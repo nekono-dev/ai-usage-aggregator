@@ -1,7 +1,10 @@
 services:
   app:
-    build: .
-    user: "10001:10001"
+    build:
+      context: .
+      args:
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
     read_only: true
     cap_drop:
       - ALL
@@ -11,7 +14,7 @@ services:
       - .env
     environment:
       DB_PATH: /data/usage.db
-      LOG_DIRS: claude-code=/logs/claude,codex=/logs/codex,pi=/logs/pi
+      LOG_DIRS: "${LOG_DIRS-claude-code=/logs/claude,codex=/logs/codex,pi=/logs/pi}"
     volumes:
       - usage-data:/data
       # エージェントCLIのセッションログは読み取り専用でマウントする

@@ -60,11 +60,15 @@ sudo usermod -aG docker $USER   # 再ログイン後に有効
 ```bash
 cp .env.example .env
 # .env を編集: APP_API_KEY（openssl rand -hex 32 で生成）、TUNNEL_TOKEN、
-# CLAUDE_LOG_DIR / CODEX_LOG_DIR / PI_LOG_DIR（ホスト側の実パス）
+# CLAUDE_LOG_DIR / CODEX_LOG_DIR / PI_LOG_DIR（ホスト側の実パス）、
+# APP_UID / APP_GID（ログの所有ユーザーで実行した id -u / id -g）
 docker compose up -d --build
 docker compose ps        # app が healthy になることを確認
 docker compose logs -f app
 ```
+
+既存の `usage-data` ボリュームに SQLite データがある場合、`APP_UID` / `APP_GID` を
+変更する前に、ボリューム内のディレクトリとファイルの所有者を新しい UID/GID に合わせてください。
 
 ## 疎通確認
 
