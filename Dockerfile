@@ -1,7 +1,11 @@
 FROM python:3.13-slim
 
-# 非rootユーザーで実行する（最小権限）
-RUN useradd --uid 10001 --create-home app
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+# 名前付きボリュームの初期所有者を、実行ユーザーに合わせる。
+RUN test "$APP_UID" -gt 0 && test "$APP_GID" -gt 0 \
+    && install -d -m 0750 -o "$APP_UID" -g "$APP_GID" /data
 
 WORKDIR /app
 
@@ -9,7 +13,7 @@ RUN pip install --no-cache-dir fastapi uvicorn
 
 COPY app/ ./app/
 
-USER app
+USER ${APP_UID}:${APP_GID}
 
 EXPOSE 8000
 
