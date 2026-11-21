@@ -55,16 +55,32 @@ sudo usermod -aG docker $USER   # 再ログイン後に有効
    - Service: Type `HTTP`、URL `app:8000`
      （cloudflared コンテナから見た app コンテナのアドレスです）
 
+### 公開URLの形（サブドメイン / パス配下）
+
+- **サブドメインのルート**（例: `https://usage.example.com/`）: そのまま
+  動きます。追加設定は不要です。
+- **パス配下**（例: `https://ai.example.com/usage/`）: Cloudflare Tunnel は
+  パスを剥がさないため、リクエストは `/usage/healthz` の形でアプリに届き
+  ます。アプリはプレフィックスを検出して剥がすので、この形でも動きます。
+  - 検出は自動です（先頭セグメントの次が既知ルートの場合に剥がす）。
+  - 確実に動かしたい場合は `.env` に `APP_BASE_PATH=/usage` を設定して
+    ください（自動検出より優先されます）。
+  - `X-Forwarded-Prefix` ヘッダが付いている場合もそれを使います。
+
 ## 起動手順
 
 ```bash
 cp .env.example .env
 # .env を編集: APP_API_KEY（openssl rand -hex 32 で生成）、TUNNEL_TOKEN、
-# CLAUDE_LOG_DIR / CODEX_LOG_DIR / PI_LOG_DIR（ホスト側の実パス）
+# CLAUDE_LOG_DIR / CODEX_LOG_DIR / PI_LOG_DIR（ホスト側の実パス）、
+# APP_UID / APP_GID（ログの所有ユーザーで実行した id -u / id -g）
 docker compose up -d --build
 docker compose ps        # app が healthy になることを確認
 docker compose logs -f app
 ```
+
+既存の `usage-data` ボリュームに SQLite データがある場合、`APP_UID` / `APP_GID` を
+変更する前に、ボリューム内のディレクトリとファイルの所有者を新しい UID/GID に合わせてください。
 
 ## 疎通確認
 
@@ -142,6 +158,62 @@ cache_read / cache_write、USD/1Mトークン）で計算します。単価表�
 レスポンスの `api_equivalent_cost_usd` は、全レコードを API リスト価格で
 換算した**参考値**です。サブスク利用分を「API で処理した場合いくらか」の
 比較に使うためのもので、実際の支出ではありません。
+
+### 管理 API（/v1/admin/*）
+
+運用・メンテナンス用です。認証は通常の API と同じキーです。
+
+- `GET /v1/admin/status` : 稼働中バージョン（ビルド時の git コミット）、
+  DB のレコード数とサイズ、最終収集時刻、メンテナンス状態、更新状況
+- `POST /v1/admin/collect` : ログ収集を即時実行
+- `POST /v1/admin/backup` : SQLite のバックアップを DB と同じボリュームの
+  `backups/` に作成。`GET /v1/admin/backups` で一覧
+- `POST /v1/admin/maintenance` `{"enabled": true|false}` :
+  メンテナンスモード切替。有効中は `/healthz` と管理 API 以外に 503 を返す
+- `POST /v1/admin/update` `{"ref": "main"}` : 更新リクエストを記録する
+  （`ref` は `main` / `develop` / `vX.Y.Z` のみ）。実際の更新は updater が実行
+- `GET /v1/admin/update` : 保留中のリクエストと直近の更新結果
+
+## セルフアップデート（updater サイドカー）
+
+アプリ本体は最小権限（非root、read_only、cap_drop ALL）を維持し、
+コンテナの再作成が要る処理は専任の updater コンテナが担います。
+
+1. 管理 API で更新リクエストを受けると、アプリは共有ボリューム
+   （`control`）の `update-request.json` に意図を記録するだけです
+2. updater がそれを検出し、固定手順のみを実行します:
+   稼働中コンテナのラベルから compose プロジェクト名を特定 →
+   `git fetch` して対象 ref をチェックアウト → `docker compose build app`
+   （コミットハッシュをバージョンとして埋め込み）→ `docker compose up -d app`
+   → `/healthz` で疎通確認
+3. 疎通に失敗したら旧コミットへ戻して再ビルドし、自動でロールバックします
+4. 進行と結果は `update-status.json` に書かれ、`GET /v1/admin/status` や
+   `GET /v1/admin/update` から確認できます。処理済みリクエストは
+   `control/history/` に残ります
+
+安全策:
+
+- docker.sock を持つのは updater だけです。updater はネットワークの
+  受付を一切せず、任意コマンド実行の口もありません
+- 更新対象は `main` / `develop` / `vX.Y.Z` タグのみ。同時実行はなく、
+  リクエストは10分で失効します
+- デプロイ用チェックアウトは updater が `git checkout` で切り替えます。
+  開発用クローンとは別に、デプロイ専用のクローンを使ってください
+- この機能の初回有効化だけは手動です（`git pull` して
+  `docker compose up -d --build`）。以降の更新はリクエスト経由でできます
+- updater の git fetch は、デプロイ用チェックアウトのリモート設定を
+  そのまま使います。SSH リモートの場合は、compose 実行ユーザーの
+  `~/.ssh`（config と鍵）を読み取り専用で同一パスにマウントします。
+  updater はコンテナ内で root として動くため、マウントした config と
+  鍵をそのまま使うと OpenSSH が所有者不一致で無視します。そのため
+  updater は処理のたびに `~/.ssh` を所有者を揃えた専用コピーに
+  ステージングし、config 内のパス参照も書き換えてから使います
+  （`sudo` で compose を実行すると HOME が変わって鍵を
+  参照できないので、通常ユーザーで実行してください）。
+  HTTPS リモートの場合は、認証情報が同じパスで参照できるよう
+  ホスト側で資格情報を設定しておく必要があります
+- 動作確認だけしたい場合は `.env` に `UPDATER_DRY_RUN=1` を設定すると、
+  updater が git / docker を実行せず成功扱いで状態だけ進めます
 
 ## ログの取り込み仕様
 

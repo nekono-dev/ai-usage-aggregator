@@ -1,7 +1,13 @@
 services:
   app:
-    build: .
-    user: "10001:10001"
+    build:
+      context: .
+      args:
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
+        # 稼働バージョンとして /v1/admin/status に出す。通常は updater が
+        # ビルド時に自動で埋めるため、手動ビルド時だけ指定すればよい
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     read_only: true
     cap_drop:
       - ALL
@@ -11,9 +17,15 @@ services:
       - .env
     environment:
       DB_PATH: /data/usage.db
-      LOG_DIRS: claude-code=/logs/claude,codex=/logs/codex,pi=/logs/pi
+      LOG_DIRS: "${LOG_DIRS-claude-code=/logs/claude,codex=/logs/codex,pi=/logs/pi}"
+      # パス配下で公開する場合のみ設定する（例: /usage）。サブドメインの
+      # ルートで公開する場合は空のまま。未設定でもアプリが自動検出する
+      APP_BASE_PATH: "${APP_BASE_PATH:-}"
+      # updater サイドカーとの制御ファイル受け渡し用
+      CONTROL_DIR: /control
     volumes:
       - usage-data:/data
+      - control:/control
       # エージェントCLIのセッションログは読み取り専用でマウントする
       - ${CLAUDE_LOG_DIR:-./logs/claude}:/logs/claude:ro
       - ${CODEX_LOG_DIR:-./logs/codex}:/logs/codex:ro
@@ -37,5 +49,36 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # セルフアップデートの実行役。docker.sock を持つのはこのコンテナだけ。
+  # ネットワークの受付はせず、アプリが control ボリュームに書いた
+  # 更新リクエスト（固定手順のみ）を実行する。
+  updater:
+    build:
+      context: ./updater
+    environment:
+      CONTROL_DIR: /control
+      PROJECT_DIR: /project
+      APP_HEALTH_URL: http://app:8000/healthz
+      # 動作確認用。1 のときは git / docker を実行せず成功扱いで状態だけ進める
+      UPDATER_DRY_RUN: "${UPDATER_DRY_RUN:-}"
+      # git の SSH 接続をホストの実行ユーザーと同じ設定で行うための指定。
+      # ~/.ssh はそのままのパスでマウントし、updater が起動時に所有者を
+      # 揃えたコピーを作ってそちらを使う（OpenSSH は所有者の違う config と
+      # 鍵を無視するため）。SOURCE_HOME はコピー元の特定用
+      HOME: "${HOME}"
+      SOURCE_HOME: "${HOME}"
+      GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts"
+    volumes:
+      - control:/control
+      # デプロイ用チェックアウトそのものをマウントする（git pull の対象）
+      - .:/project
+      - /var/run/docker.sock:/var/run/docker.sock
+      # SSH リモートから fetch するため、実行ユーザーの ~/.ssh を
+      # 読み取り専用・同一パスでマウントする（config と鍵）
+      - ${HOME}/.ssh:${HOME}/.ssh:ro
+    depends_on:
+      - app
+
 volumes:
   usage-data:
+  control:
