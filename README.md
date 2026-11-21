@@ -229,7 +229,12 @@ Admin キーについて:
    稼働中コンテナのラベルから compose プロジェクト名を特定 →
    `git fetch` して対象 ref をチェックアウト → `docker compose build app`
    （コミットハッシュをバージョンとして埋め込み）→ `docker compose up -d app`
-   → `/healthz` で疎通確認
+   → `/healthz` で疎通確認。ブランチのチェックアウトは通常
+   `pull --ff-only` で進め、リモートの履歴が書き換えられて分岐していた
+   場合は `origin` の向き先へ `reset --hard` して自動追従します
+   （デプロイ専用クローンであることが前提。ロールバック用に旧コミットは
+   保持されます）。compose はプロジェクトディレクトリを cwd に実行し、
+   ログディレクトリのマウント元は稼働中コンテナから引き継ぎます
 3. 疎通に失敗したら旧コミットへ戻して再ビルドし、自動でロールバックします
 4. 進行と結果は `update-status.json` に書かれ、`GET /v1/admin/status` や
    `GET /v1/admin/update` から確認できます。処理済みリクエストは
