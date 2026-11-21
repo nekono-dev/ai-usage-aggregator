@@ -69,11 +69,20 @@ sudo usermod -aG docker $USER   # 再ログイン後に有効
 
 ## 起動手順
 
+簡単な導入には `./install.sh`（clone、.env 生成、デプロイキー生成、
+起動、ヘルスチェックまで）があります。AI エージェントに対話形式で
+導入・保守を任せる場合は `docs/agent-setup.md` が手順書です。
+
+手動の場合は:
+
 ```bash
 cp .env.example .env
 # .env を編集: APP_API_KEY（openssl rand -hex 32 で生成）、TUNNEL_TOKEN、
 # CLAUDE_LOG_DIR / CODEX_LOG_DIR / PI_LOG_DIR（ホスト側の実パス）、
-# APP_UID / APP_GID（ログの所有ユーザーで実行した id -u / id -g）
+# APP_UID / APP_GID（ログの所有ユーザーで実行した id -u / id -g）、
+# GIT_REPO_URL（updater の自前クローン用）
+# SSH の場合は読み取り専用デプロイキーを ./deploy_key に置き、公開鍵を
+# リポジトリの Deploy keys に登録する
 docker compose up -d --build
 docker compose ps        # app が healthy になることを確認
 docker compose logs -f app
@@ -227,14 +236,15 @@ Admin キーについて:
    （`control`）の `update-request.json` に意図を記録するだけです
 2. updater がそれを検出し、固定手順のみを実行します:
    稼働中コンテナのラベルから compose プロジェクト名を特定 →
-   `git fetch` して対象 ref をチェックアウト → `docker compose build app`
-   （コミットハッシュをバージョンとして埋め込み）→ `docker compose up -d app`
+   専用ボリューム内の自前クローンを `git fetch` して対象 ref を
+   チェックアウト → `docker compose build app`（コミットハッシュを
+   バージョンとして埋め込み）→ `docker compose up -d app`
    → `/healthz` で疎通確認。ブランチのチェックアウトは通常
    `pull --ff-only` で進め、リモートの履歴が書き換えられて分岐していた
    場合は `origin` の向き先へ `reset --hard` して自動追従します
-   （デプロイ専用クローンであることが前提。ロールバック用に旧コミットは
-   保持されます）。compose はプロジェクトディレクトリを cwd に実行し、
-   ログディレクトリのマウント元は稼働中コンテナから引き継ぎます
+   （ロールバック用に旧コミットは保持されます）。compose は
+   プロジェクトディレクトリを cwd に実行し、ログディレクトリの
+   マウント元は稼働中コンテナから引き継ぎます
 3. 疎通に失敗したら旧コミットへ戻して再ビルドし、自動でロールバックします
 4. 進行と結果は `update-status.json` に書かれ、`GET /v1/admin/status` や
    `GET /v1/admin/update` から確認できます。処理済みリクエストは
@@ -246,21 +256,17 @@ Admin キーについて:
   受付を一切せず、任意コマンド実行の口もありません
 - 更新対象は `main` / `develop` / `vX.Y.Z` タグのみ。同時実行はなく、
   リクエストは10分で失効します
-- デプロイ用チェックアウトは updater が `git checkout` で切り替えます。
-  開発用クローンとは別に、デプロイ専用のクローンを使ってください
-- この機能の初回有効化だけは手動です（`git pull` して
-  `docker compose up -d --build`）。以降の更新はリクエスト経由でできます
-- updater の git fetch は、デプロイ用チェックアウトのリモート設定を
-  そのまま使います。SSH リモートの場合は、compose 実行ユーザーの
-  `~/.ssh`（config と鍵）を読み取り専用で同一パスにマウントします。
-  updater はコンテナ内で root として動くため、マウントした config と
-  鍵をそのまま使うと OpenSSH が所有者不一致で無視します。そのため
-  updater は処理のたびに `~/.ssh` を所有者を揃えた専用コピーに
-  ステージングし、config 内のパス参照も書き換えてから使います
-  （`sudo` で compose を実行すると HOME が変わって鍵を
-  参照できないので、通常ユーザーで実行してください）。
-  HTTPS リモートの場合は、認証情報が同じパスで参照できるよう
-  ホスト側で資格情報を設定しておく必要があります
+- ソースは updater 専用ボリューム（`source`）内の自前クローンで管理
+  します。ホストのチェックアウトはブートストラップ専用で、updater は
+  それを切り替えません（手動の git 操作と競合しません）
+- クローンの取得元は `.env` の `GIT_REPO_URL`。認証は、SSH の場合は
+  `./deploy_key` に置いた読み取り専用デプロイキー（コンテナ内では
+  root 所有にコピーし直してから使う）、HTTPS の場合は `.env` の
+  `GIT_TOKEN`（askpass 経由で渡し、保存はしません）
+- この機能の初回有効化と、updater 自体の更新だけは手動です
+  （ホストのチェックアウトで `git pull` して
+  `docker compose up -d --build updater`）。以降の app 更新は
+  リクエスト経由でできます
 - 動作確認だけしたい場合は `.env` に `UPDATER_DRY_RUN=1` を設定すると、
   updater が git / docker を実行せず成功扱いで状態だけ進めます
 

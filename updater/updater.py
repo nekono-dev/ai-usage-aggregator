@@ -4,13 +4,20 @@
 アプリ本体は最小権限のままにし、コンテナの再作成が要る処理だけを
 このサイドカーが担う。ネットワークの受付は一切しない。
 
+ソースはホストのチェックアウトではなく、updater 専用ボリューム内の
+自前クローン（PROJECT_DIR）を使う。ホスト側の git 状態に干渉されず、
+手動の git 操作で更新が壊れることもない。クローンが無ければ
+GIT_REPO_URL から初回 clone する。認証は次のいずれか:
+- SSH: GIT_DEPLOY_KEY_FILE（読み取り専用のデプロイキーをマウント）
+- HTTPS: GIT_TOKEN（環境変数。askpass 経由で渡し、どこにも保存しない）
+
 動作:
 - CONTROL_DIR（アプリと共有するボリューム）の update-request.json を監視
 - リクエストが来たら固定手順のみ実行する（任意コマンド実行はしない）
   1. 稼働中アプリのコンテナラベルから compose プロジェクト名を特定
-  2. git fetch して対象 ref（main / develop / vX.Y.Z のみ）をチェックアウト。
-     ブランチは pull --ff-only を試み、分岐していたら（履歴の書き換え等）
-     origin の向き先へ reset --hard で自動追従する
+  2. 自前クローンを fetch して対象 ref（main / develop / vX.Y.Z のみ）を
+     チェックアウト。ブランチは pull --ff-only を試み、分岐していたら
+     （履歴の書き換え等）origin の向き先へ reset --hard で自動追従する
   3. docker compose build app（GIT_COMMIT を埋め込み）→ up -d app。
      compose はプロジェクトディレクトリを cwd にして実行し、ログ
      ディレクトリのマウント元は稼働中コンテナから引き継ぐ
@@ -34,7 +41,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CONTROL_DIR = Path(os.environ.get("CONTROL_DIR", "/control"))
-PROJECT_DIR = Path(os.environ.get("PROJECT_DIR", "/project"))
+PROJECT_DIR = Path(os.environ.get("PROJECT_DIR", "/src/repo"))
+REPO_URL = os.environ.get("GIT_REPO_URL", "")
+GIT_TOKEN = os.environ.get("GIT_TOKEN", "")
+DEPLOY_KEY_FILE = os.environ.get("GIT_DEPLOY_KEY_FILE", "")
 HEALTH_URL = os.environ.get("APP_HEALTH_URL", "http://app:8000/healthz")
 POLL_INTERVAL_SEC = float(os.environ.get("POLL_INTERVAL_SEC", "5"))
 REQUEST_TTL_SEC = float(os.environ.get("REQUEST_TTL_SEC", "600"))
@@ -50,61 +60,80 @@ HISTORY_DIR = CONTROL_DIR / "history"
 _ALLOWED_REF = re.compile(r"^(main|develop|v\d+\.\d+\.\d+)$")
 _GIT = ["git", "-c", f"safe.directory={PROJECT_DIR}", "-C", str(PROJECT_DIR)]
 
-# git / ssh 実行用のステージング HOME。
-# コンテナは root で動くため、ホストユーザーの所有する ~/.ssh を直接使うと
-# OpenSSH が所有者不一致で config と鍵を無視する（"Bad owner or permissions"）。
-# そこでマウントされた ~/.ssh を root 所有・厳密なパーミッションで
-# コピーし直し、パス参照も書き換えたうえで、git の HOME として使う。
-STAGE_HOME = Path("/tmp/updater-home")
+# git 実行用の認証 env。prepare_git_env() が組み立てる。
+# - SSH: マウントされたデプロイキーは所有者がホストユーザーで、root で
+#   動く ssh がそのままでは拒むことがあるため、root 所有・600 で
+#   コピーし直して -i で明示する（config は使わず、鍵は1本だけ）
+# - HTTPS: GIT_TOKEN を askpass スクリプト経由で渡す。トークン自体は
+#   スクリプトにも .git/config にも書かない
+SSH_STAGE_DIR = Path("/tmp/updater-ssh")
 _git_env: dict = {}
 
 
 def prepare_git_env() -> dict:
-    """マウントされた実行ユーザーの ~/.ssh をステージングして git 用 env を返す。"""
-    src_home = Path(os.environ.get("SOURCE_HOME") or os.environ.get("HOME", "/root"))
-    staged: dict = {}
+    env: dict = {}
     try:
-        src_ssh = src_home / ".ssh"
-        if src_ssh.is_dir():
-            dst_ssh = STAGE_HOME / ".ssh"
-            if dst_ssh.exists():
-                shutil.rmtree(dst_ssh)
-            STAGE_HOME.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(src_ssh, dst_ssh, symlinks=False)
-            dst_ssh.chmod(0o700)
-            for item in dst_ssh.rglob("*"):
-                if item.is_file():
-                    item.chmod(0o644 if item.suffix == ".pub" else 0o600)
-            config = dst_ssh / "config"
-            if config.exists():
-                config.write_text(
-                    config.read_text(encoding="utf-8", errors="replace")
-                    .replace(str(src_home), str(STAGE_HOME)),
-                    encoding="utf-8")
-                # $HOME 経由の config 参照は実行環境（setuid や passwd の
-                # ホーム参照）で効かないことがあるため、ssh には -F で
-                # ステージングした config を明示的に渡す
-                staged["GIT_SSH_COMMAND"] = (
-                    f"ssh -F {dst_ssh}/config"
+        if DEPLOY_KEY_FILE:
+            key_src = Path(DEPLOY_KEY_FILE)
+            if key_src.is_file() and key_src.stat().st_size > 0:
+                SSH_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+                key_dst = SSH_STAGE_DIR / "id"
+                key_dst.write_bytes(key_src.read_bytes())
+                key_dst.chmod(0o600)
+                known_hosts = PROJECT_DIR.parent / "known_hosts"
+                env["GIT_SSH_COMMAND"] = (
+                    f"ssh -i {key_dst} -o IdentitiesOnly=yes"
                     " -o StrictHostKeyChecking=accept-new"
-                    f" -o UserKnownHostsFile={STAGE_HOME}/known_hosts")
-            staged["HOME"] = str(STAGE_HOME)
-        src_gitconfig = src_home / ".gitconfig"
-        if src_gitconfig.is_file():
-            dst_gitconfig = STAGE_HOME / ".gitconfig"
-            STAGE_HOME.mkdir(parents=True, exist_ok=True)
-            dst_gitconfig.write_text(
-                src_gitconfig.read_text(encoding="utf-8", errors="replace")
-                .replace(str(src_home), str(STAGE_HOME)),
-                encoding="utf-8")
-            dst_gitconfig.chmod(0o600)
-            staged["HOME"] = str(STAGE_HOME)
+                    f" -o UserKnownHostsFile={known_hosts}")
+        if GIT_TOKEN:
+            SSH_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+            askpass = SSH_STAGE_DIR / "askpass.sh"
+            askpass.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  *sername*) echo x-access-token ;;\n"
+                "  *) echo \"$GIT_TOKEN\" ;;\n"
+                "esac\n", encoding="utf-8")
+            askpass.chmod(0o700)
+            env["GIT_ASKPASS"] = str(askpass)
+            env["GIT_TERMINAL_PROMPT"] = "0"
     except OSError as e:
-        log(f"ssh staging failed (continuing without it): {e}")
+        log(f"git auth staging failed (continuing without it): {e}")
         return {}
-    if staged:
-        log(f"staged ssh config from {src_home} into {STAGE_HOME}")
-    return staged
+    return env
+
+
+def ensure_clone() -> tuple[bool, str]:
+    """自前クローンが無ければ GIT_REPO_URL から clone する。
+
+    PROJECT_DIR（例 /src/repo）の親が専用ボリューム。PROJECT_DIR 直下
+    には .env がファイルマウントされていて clone 先にできないため、
+    隣に clone してから中身（.git 含む）を移す。.env はリポジトリに
+    含まれないので衝突しない。
+    """
+    if (PROJECT_DIR / ".git").is_dir():
+        return True, ""
+    if not REPO_URL:
+        return False, "GIT_REPO_URL is not set (cannot clone)"
+    tmp = PROJECT_DIR.parent / "clone-tmp"
+    try:
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        code, out = run(["git", "clone", REPO_URL, str(tmp)],
+                        env_extra=_git_env, timeout=600)
+        if code != 0:
+            return False, f"git clone failed: {out}"
+        PROJECT_DIR.mkdir(parents=True, exist_ok=True)
+        for item in tmp.iterdir():
+            item.rename(PROJECT_DIR / item.name)
+        tmp.rmdir()
+        log(f"cloned {REPO_URL} into {PROJECT_DIR}")
+        return True, ""
+    except OSError as e:
+        return False, f"clone staging failed: {e}"
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def now_iso() -> str:
@@ -318,6 +347,10 @@ def process_request(req: dict) -> None:
                    detail="could not discover compose project from running app container")
         return
     _RUNTIME_ENV = discover_log_env()
+    ok_clone, clone_detail = ensure_clone()
+    if not ok_clone:
+        set_status(request_id, "failed", ref=ref, detail=clone_detail)
+        return
     code, prev = git("rev-parse", "HEAD")
     if code != 0:
         set_status(request_id, "failed", ref=ref, detail=f"rev-parse failed: {prev}")
@@ -353,7 +386,13 @@ def process_request(req: dict) -> None:
 
 
 def main() -> int:
+    global _git_env
     log(f"updater started (dry_run={DRY_RUN}, project_dir={PROJECT_DIR})")
+    _git_env = prepare_git_env()
+    ok_clone, clone_detail = ensure_clone()
+    if not ok_clone:
+        log(f"initial clone skipped/failed: {clone_detail} "
+            "(will retry on update request)")
     while True:
         try:
             req = read_json(REQUEST_FILE)
