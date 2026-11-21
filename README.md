@@ -69,8 +69,8 @@ sudo usermod -aG docker $USER   # 再ログイン後に有効
 
 ## 起動手順
 
-簡単な導入には `./install.sh`（clone、.env 生成、デプロイキー生成、
-起動、ヘルスチェックまで）があります。AI エージェントに対話形式で
+簡単な導入には `./install.sh`（clone、.env 生成、起動、
+ヘルスチェックまで）があります。AI エージェントに対話形式で
 導入・保守を任せる場合は `docs/agent-setup.md` が手順書です。
 
 手動の場合は:
@@ -79,10 +79,8 @@ sudo usermod -aG docker $USER   # 再ログイン後に有効
 cp .env.example .env
 # .env を編集: APP_API_KEY（openssl rand -hex 32 で生成）、TUNNEL_TOKEN、
 # CLAUDE_LOG_DIR / CODEX_LOG_DIR / PI_LOG_DIR（ホスト側の実パス）、
-# APP_UID / APP_GID（ログの所有ユーザーで実行した id -u / id -g）、
-# GIT_REPO_URL（updater の自前クローン用）
-# SSH の場合は読み取り専用デプロイキーを ./deploy_key に置き、公開鍵を
-# リポジトリの Deploy keys に登録する
+# APP_UID / APP_GID（ログの所有ユーザーで実行した id -u / id -g）。
+# GIT_REPO_URL は未指定でよい（公式リポジトリから取得する。認証不要）
 docker compose up -d --build
 docker compose ps        # app が healthy になることを確認
 docker compose logs -f app
@@ -259,10 +257,9 @@ Admin キーについて:
 - ソースは updater 専用ボリューム（`source`）内の自前クローンで管理
   します。ホストのチェックアウトはブートストラップ専用で、updater は
   それを切り替えません（手動の git 操作と競合しません）
-- クローンの取得元は `.env` の `GIT_REPO_URL`。認証は、SSH の場合は
-  `./deploy_key` に置いた読み取り専用デプロイキー（コンテナ内では
-  root 所有にコピーし直してから使う）、HTTPS の場合は `.env` の
-  `GIT_TOKEN`（askpass 経由で渡し、保存はしません）
+- クローンの取得元は `.env` の `GIT_REPO_URL`（未指定なら公式
+  リポジトリ）。このリポジトリは公開前提のため、clone / fetch に
+  認証情報は不要です
 - この機能の初回有効化と、updater 自体の更新だけは手動です
   （ホストのチェックアウトで `git pull` して
   `docker compose up -d --build updater`）。以降の app 更新は

@@ -63,19 +63,14 @@ services:
       APP_HEALTH_URL: http://app:8000/healthz
       # 動作確認用。1 のときは git / docker を実行せず成功扱いで状態だけ進める
       UPDATER_DRY_RUN: "${UPDATER_DRY_RUN:-}"
-      # 自前クローンの取得元と認証（.env で指定）。
-      # SSH の場合は読み取り専用デプロイキーを ./deploy_key に置く。
-      # HTTPS の場合は GIT_TOKEN を使う
+      # 自前クローンの取得元（公開リポジトリ。未指定なら公式 URL）
       GIT_REPO_URL: "${GIT_REPO_URL:-}"
-      GIT_TOKEN: "${GIT_TOKEN:-}"
-      GIT_DEPLOY_KEY_FILE: /run/secrets/deploy_key
     volumes:
       - control:/control
       - source:/src
       # compose の interpolation と app の env_file 用に、ホストの .env を
       # クローン直下へそのまま見せる
       - ./.env:/src/repo/.env:ro
-      - ./deploy_key:/run/secrets/deploy_key:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - app

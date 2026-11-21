@@ -4,7 +4,7 @@
 ai-usage-aggregator の導入から保守までを行うための手順書です。
 エージェントは各ステップで確認を取り、検証結果をユーザーに報告しながら
 進めてください。秘密情報（API キー、トークン、秘密鍵）はチャットに
-貼らせず、ホスト上のファイル（.env、deploy_key）に直接書かせてください。
+貼らせず、ホスト上の .env ファイルに直接書かせてください。
 
 ## 全体像
 
@@ -22,8 +22,8 @@ ai-usage-aggregator の導入から保守までを行うための手順書です
 
 ### 0. 事前にユーザーへ確認すること
 
-1. リポジトリの URL と、updater の clone 認証方式
-   （SSH デプロイキー推奨 / HTTPS トークン）
+1. リポジトリの URL（公式リポジトリは公開のため clone に認証は不要。
+   フォーク等を使う場合のみ確認する）
 2. 公開方法（Cloudflare Tunnel のトークンの有無、またはサブドメイン /
    パス配下のどちらで公開するか）
 3. エージェント CLI のログの場所（既定: ~/.claude/projects、
@@ -40,11 +40,8 @@ cd ai-usage-aggregator-src
 ./install.sh ~/ai-usage-aggregator
 ```
 
-install.sh が clone、.env 生成（APP_API_KEY はランダム）、デプロイキー
-生成、起動、ヘルスチェックまで行います。途中で表示される公開鍵を、
-ユーザーが GitHub リポジトリの Settings → Deploy keys に
-Read-only で登録したことを確認してください（エージェントが GitHub の
-管理権限を持つ場合は、公開鍵を受け取って API で登録しても構いません）。
+install.sh が clone、.env 生成（APP_API_KEY はランダム）、起動、
+ヘルスチェックまで行います。
 
 ### 2. 導入後の検証（エージェントが API 経由で確認）
 
@@ -90,9 +87,8 @@ Read-only で登録したことを確認してください（エージェント�
   Admin キー等）: .env を編集し `docker compose up -d app`
   （ホストのブートストラップ用チェックアウトで実行。古い場合は
   先に git pull する）
-- updater の設定（GIT_REPO_URL、認証）: .env 編集後に
-  `docker compose up -d updater`。デプロイキーを差し替えた場合は
-  ./deploy_key を置き換えてから
+- updater の設定（GIT_REPO_URL）: .env 編集後に
+  `docker compose up -d updater`
 
 ### API 計測の有効化
 
@@ -104,12 +100,11 @@ Read-only で登録したことを確認してください（エージェント�
 
 ## 既存デプロイ（ホストクローン方式）からの移行
 
-1. .env に GIT_REPO_URL を追加する
-2. ./deploy_key に updater 用デプロイキーを生成し、公開鍵を
-   リポジトリの Deploy keys に Read-only で登録する
-3. ホストのチェックアウトで git pull し、
+1. ホストのチェックアウトで git pull し、
    `docker compose up -d --build updater` で updater を入れ替える
-4. updater が source ボリュームへ clone したことをログで確認する。
+   （GIT_REPO_URL は未指定なら公式リポジトリが使われる。
+   clone は公開リポジトリ前提で認証不要）
+2. updater が source ボリュームへ clone したことをログで確認する。
    以後、ホストのチェックアウトはブートストラップ専用となり、
    更新は管理 API から行う
 
@@ -117,7 +112,7 @@ Read-only で登録したことを確認してください（エージェント�
 
 | 症状 | 原因と対処 |
 |---|---|
-| 更新が `git clone failed` / `checkout failed` で失敗 | clone 認証の問題。デプロイキーが Deploy keys に登録されているか、GIT_TOKEN の権限、GIT_REPO_URL の綴りを確認 |
+| 更新が `git clone failed` / `checkout failed` で失敗 | ネットワーク到達性と GIT_REPO_URL の綴りを確認（公開リポジトリのため認証は不要） |
 | 更新が `build failed: no configuration file provided` | updater が古い（compose の cwd 修正前）。ホストで pull + `docker compose up -d --build updater` |
 | 更新の detail に reset の記録 | 履歴書き換えへの自動追従。正常系。頻発する場合はスカッシュマージ等の運用を見直す |
 | admin status の version が `unknown` | GIT_COMMIT を埋めずに手動ビルドされた app。updater 経由で更新すると刻印される |

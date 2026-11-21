@@ -7,9 +7,8 @@
 ソースはホストのチェックアウトではなく、updater 専用ボリューム内の
 自前クローン（PROJECT_DIR）を使う。ホスト側の git 状態に干渉されず、
 手動の git 操作で更新が壊れることもない。クローンが無ければ
-GIT_REPO_URL から初回 clone する。認証は次のいずれか:
-- SSH: GIT_DEPLOY_KEY_FILE（読み取り専用のデプロイキーをマウント）
-- HTTPS: GIT_TOKEN（環境変数。askpass 経由で渡し、どこにも保存しない）
+GIT_REPO_URL から初回 clone する。このリポジトリは公開前提のため、
+clone / fetch に認証は不要（URL は差し替え可能）。
 
 動作:
 - CONTROL_DIR（アプリと共有するボリューム）の update-request.json を監視
@@ -42,9 +41,8 @@ from pathlib import Path
 
 CONTROL_DIR = Path(os.environ.get("CONTROL_DIR", "/control"))
 PROJECT_DIR = Path(os.environ.get("PROJECT_DIR", "/src/repo"))
-REPO_URL = os.environ.get("GIT_REPO_URL", "")
-GIT_TOKEN = os.environ.get("GIT_TOKEN", "")
-DEPLOY_KEY_FILE = os.environ.get("GIT_DEPLOY_KEY_FILE", "")
+REPO_URL = os.environ.get("GIT_REPO_URL") or \
+    "https://github.com/nekono-dev/ai-usage-aggregator.git"
 HEALTH_URL = os.environ.get("APP_HEALTH_URL", "http://app:8000/healthz")
 POLL_INTERVAL_SEC = float(os.environ.get("POLL_INTERVAL_SEC", "5"))
 REQUEST_TTL_SEC = float(os.environ.get("REQUEST_TTL_SEC", "600"))
@@ -60,47 +58,8 @@ HISTORY_DIR = CONTROL_DIR / "history"
 _ALLOWED_REF = re.compile(r"^(main|develop|v\d+\.\d+\.\d+)$")
 _GIT = ["git", "-c", f"safe.directory={PROJECT_DIR}", "-C", str(PROJECT_DIR)]
 
-# git 実行用の認証 env。prepare_git_env() が組み立てる。
-# - SSH: マウントされたデプロイキーは所有者がホストユーザーで、root で
-#   動く ssh がそのままでは拒むことがあるため、root 所有・600 で
-#   コピーし直して -i で明示する（config は使わず、鍵は1本だけ）
-# - HTTPS: GIT_TOKEN を askpass スクリプト経由で渡す。トークン自体は
-#   スクリプトにも .git/config にも書かない
-SSH_STAGE_DIR = Path("/tmp/updater-ssh")
+# 公開リポジトリ前提のため、git の clone / fetch に認証は不要。
 _git_env: dict = {}
-
-
-def prepare_git_env() -> dict:
-    env: dict = {}
-    try:
-        if DEPLOY_KEY_FILE:
-            key_src = Path(DEPLOY_KEY_FILE)
-            if key_src.is_file() and key_src.stat().st_size > 0:
-                SSH_STAGE_DIR.mkdir(parents=True, exist_ok=True)
-                key_dst = SSH_STAGE_DIR / "id"
-                key_dst.write_bytes(key_src.read_bytes())
-                key_dst.chmod(0o600)
-                known_hosts = PROJECT_DIR.parent / "known_hosts"
-                env["GIT_SSH_COMMAND"] = (
-                    f"ssh -i {key_dst} -o IdentitiesOnly=yes"
-                    " -o StrictHostKeyChecking=accept-new"
-                    f" -o UserKnownHostsFile={known_hosts}")
-        if GIT_TOKEN:
-            SSH_STAGE_DIR.mkdir(parents=True, exist_ok=True)
-            askpass = SSH_STAGE_DIR / "askpass.sh"
-            askpass.write_text(
-                "#!/bin/sh\n"
-                "case \"$1\" in\n"
-                "  *sername*) echo x-access-token ;;\n"
-                "  *) echo \"$GIT_TOKEN\" ;;\n"
-                "esac\n", encoding="utf-8")
-            askpass.chmod(0o700)
-            env["GIT_ASKPASS"] = str(askpass)
-            env["GIT_TERMINAL_PROMPT"] = "0"
-    except OSError as e:
-        log(f"git auth staging failed (continuing without it): {e}")
-        return {}
-    return env
 
 
 def ensure_clone() -> tuple[bool, str]:
@@ -327,8 +286,7 @@ def build_and_restart(project: str, commit: str) -> tuple[bool, str]:
 
 
 def process_request(req: dict) -> None:
-    global _git_env, _RUNTIME_ENV
-    _git_env = prepare_git_env()
+    global _RUNTIME_ENV
     request_id = str(req.get("request_id", ""))
     ref = str(req.get("ref", ""))
     if not _ALLOWED_REF.match(ref):
@@ -386,9 +344,7 @@ def process_request(req: dict) -> None:
 
 
 def main() -> int:
-    global _git_env
     log(f"updater started (dry_run={DRY_RUN}, project_dir={PROJECT_DIR})")
-    _git_env = prepare_git_env()
     ok_clone, clone_detail = ensure_clone()
     if not ok_clone:
         log(f"initial clone skipped/failed: {clone_detail} "
