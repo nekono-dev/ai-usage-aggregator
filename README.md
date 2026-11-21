@@ -159,6 +159,50 @@ cache_read / cache_write、USD/1Mトークン）で計算します。単価表�
 換算した**参考値**です。サブスク利用分を「API で処理した場合いくらか」の
 比較に使うためのもので、実際の支出ではありません。
 
+### GET /v1/api-usage?from=YYYY-MM-DD&to=YYYY-MM-DD&group_by=day|model|provider
+
+公式 Admin API から同期した API 利用の実績（トークンと実コスト）を返します。
+詳細は次節。ローカルログ計測とは別プレーンで、合算はしません。
+
+`GET /v1/summary` にも `api_official` セクションとして直近7日 / 30日の
+プロバイダ別実績が入ります。
+
+## API 計測（公式 Admin API 同期）
+
+このアプリは2つの計測を持ち、混ぜません。
+
+- **サブスクリプション計測**: ローカルログのコレクタ（従来どおり）。
+  サブスクリプション契約の枠消費を測ります
+- **API 計測**: プロバイダ公式の Usage / Cost API を定期同期し、API 課金の
+  実績（トークン量と実コスト）を測ります。API 利用はローカルログにも
+  現れるため、同じ利用を二重に数えないよう保存先を分けています。
+  API 利用の正本は公式側です
+
+仕組み:
+
+- `.env` に `ANTHROPIC_ADMIN_KEY` / `OPENAI_ADMIN_KEY` を設定した
+  プロバイダだけが同期対象です（未設定なら同期しません）
+- 同期は起動時と `PROVIDER_SYNC_INTERVAL_SEC`（既定3600秒）ごと。
+  `POST /v1/admin/sync` でも即時実行できます
+- 毎回、直近 `PROVIDER_SYNC_DAYS`（既定35日）を取り直して upsert します。
+  公式コストは約24時間遅れて確定し、約30日遡って改訂されるためです
+- 日付はプロバイダのバケット（UTC の暦日）です。ローカルログ計測
+  （ローカル日付）とは最大で半日ほどずれます
+- 同期状態は `GET /v1/admin/status` の `provider_sync` で確認できます。
+  キー自体はどのレスポンスにも含まれません
+
+Admin キーについて:
+
+- Anthropic: Claude Console の組織設定で発行する Admin API キー
+  （`sk-ant-admin…`）。Usage は `/v1/organizations/usage_report/messages`、
+  Cost は `/v1/organizations/cost_report` を使います
+- OpenAI: platform.openai.com の Settings → Admin keys で発行する
+  Admin キー（`sk-admin…`）。Usage は `/v1/organization/usage/completions`、
+  Cost は `/v1/organization/costs` を使います
+- どちらのキーも組織の管理者権限で発行するもので、通常の API キーや
+  サブスクリプション契約（Claude Pro / ChatGPT Plus）だけでは読めません。
+  アプリのコンテナから両社の API へ外向き HTTPS が必要です
+
 ### 管理 API（/v1/admin/*）
 
 運用・メンテナンス用です。認証は通常の API と同じキーです。

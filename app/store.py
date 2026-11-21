@@ -27,6 +27,30 @@ CREATE TABLE IF NOT EXISTS usage_records (
     cache_write_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_usage_occurred_at ON usage_records (occurred_at);
+
+-- 公式 Admin API から同期した API 利用の実績（ローカルログ計測とは別プレーン。
+-- 二重計上を避けるため usage_records とは絶対に合算しない）。
+-- 日付はプロバイダのバケット（UTC の暦日）。
+CREATE TABLE IF NOT EXISTS api_usage_daily (
+    provider TEXT NOT NULL,
+    date TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    requests INTEGER NOT NULL DEFAULT 0,
+    synced_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (provider, date, model)
+);
+CREATE TABLE IF NOT EXISTS api_cost_daily (
+    provider TEXT NOT NULL,
+    date TEXT NOT NULL,
+    group_key TEXT NOT NULL,
+    amount_usd REAL NOT NULL DEFAULT 0,
+    synced_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (provider, date, group_key)
+);
 """
 
 BILLING_KINDS = ("api", "subscription", "unknown")
@@ -125,6 +149,123 @@ def totals_by_model(date_from: str, date_to: str) -> list[dict]:
                WHERE substr(occurred_at, 1, 10) BETWEEN ? AND ?
                GROUP BY model, billing
                ORDER BY model, billing""",
+            (date_from, date_to),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------- 公式 API 同期分
+
+def upsert_api_usage(rows: list[dict], synced_at: str) -> int:
+    """公式 API の日次トークンを upsert する（再同期で改訂値に追随）。"""
+    with connect() as conn:
+        for r in rows:
+            conn.execute(
+                """INSERT INTO api_usage_daily
+                   (provider, date, model, input_tokens, output_tokens,
+                    cache_read_tokens, cache_write_tokens, requests, synced_at)
+                   VALUES (:provider, :date, :model, :input_tokens, :output_tokens,
+                           :cache_read_tokens, :cache_write_tokens, :requests, :synced_at)
+                   ON CONFLICT (provider, date, model) DO UPDATE SET
+                       input_tokens = excluded.input_tokens,
+                       output_tokens = excluded.output_tokens,
+                       cache_read_tokens = excluded.cache_read_tokens,
+                       cache_write_tokens = excluded.cache_write_tokens,
+                       requests = excluded.requests,
+                       synced_at = excluded.synced_at""",
+                {**r, "synced_at": synced_at},
+            )
+    return len(rows)
+
+
+def upsert_api_cost(rows: list[dict], synced_at: str) -> int:
+    """公式 API の日次実コストを upsert する。"""
+    with connect() as conn:
+        for r in rows:
+            conn.execute(
+                """INSERT INTO api_cost_daily
+                   (provider, date, group_key, amount_usd, synced_at)
+                   VALUES (:provider, :date, :group_key, :amount_usd, :synced_at)
+                   ON CONFLICT (provider, date, group_key) DO UPDATE SET
+                       amount_usd = excluded.amount_usd,
+                       synced_at = excluded.synced_at""",
+                {**r, "synced_at": synced_at},
+            )
+    return len(rows)
+
+
+_API_GROUP_EXPR = {
+    "day": "date",
+    "model": "model",
+    "provider": "provider",
+}
+
+
+def api_usage_aggregate(date_from: str, date_to: str, group_by: str) -> list[dict]:
+    """公式 API 同期分のトークンを group_by で集計する。"""
+    expr = _API_GROUP_EXPR[group_by]
+    with connect() as conn:
+        rows = conn.execute(
+            f"""SELECT {expr} AS grp,
+                       SUM(input_tokens) AS input_tokens,
+                       SUM(output_tokens) AS output_tokens,
+                       SUM(cache_read_tokens) AS cache_read_tokens,
+                       SUM(cache_write_tokens) AS cache_write_tokens,
+                       SUM(requests) AS requests
+                FROM api_usage_daily
+                WHERE date BETWEEN ? AND ?
+                GROUP BY grp
+                ORDER BY grp""",
+            (date_from, date_to),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def api_totals_by_provider(date_from: str, date_to: str) -> list[dict]:
+    """公式 API 同期分のプロバイダ別トークン合計と実コスト（summary 用）。"""
+    with connect() as conn:
+        tokens = conn.execute(
+            """SELECT provider,
+                      SUM(input_tokens) AS input_tokens,
+                      SUM(output_tokens) AS output_tokens,
+                      SUM(cache_read_tokens) AS cache_read_tokens,
+                      SUM(cache_write_tokens) AS cache_write_tokens,
+                      SUM(requests) AS requests
+               FROM api_usage_daily
+               WHERE date BETWEEN ? AND ?
+               GROUP BY provider
+               ORDER BY provider""",
+            (date_from, date_to),
+        ).fetchall()
+        costs = conn.execute(
+            """SELECT provider, SUM(amount_usd) AS amount_usd
+               FROM api_cost_daily
+               WHERE date BETWEEN ? AND ?
+               GROUP BY provider""",
+            (date_from, date_to),
+        ).fetchall()
+    cost_map = {r["provider"]: r["amount_usd"] for r in costs}
+    result = []
+    for r in tokens:
+        d = dict(r)
+        d["cost_usd"] = round(cost_map.pop(d["provider"], 0.0), 6)
+        result.append(d)
+    for provider, amount in cost_map.items():  # コストのみ存在するプロバイダ
+        result.append({"provider": provider, "input_tokens": 0, "output_tokens": 0,
+                       "cache_read_tokens": 0, "cache_write_tokens": 0,
+                       "requests": 0, "cost_usd": round(amount, 6)})
+    return result
+
+
+def api_cost_by_day(date_from: str, date_to: str) -> list[dict]:
+    """公式 API 同期分の実コストを日別に集計する。"""
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT date AS grp, SUM(amount_usd) AS amount_usd
+               FROM api_cost_daily
+               WHERE date BETWEEN ? AND ?
+               GROUP BY date
+               ORDER BY date""",
             (date_from, date_to),
         ).fetchall()
     return [dict(r) for r in rows]
