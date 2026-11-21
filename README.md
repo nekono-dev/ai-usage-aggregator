@@ -55,6 +55,18 @@ sudo usermod -aG docker $USER   # 再ログイン後に有効
    - Service: Type `HTTP`、URL `app:8000`
      （cloudflared コンテナから見た app コンテナのアドレスです）
 
+### 公開URLの形（サブドメイン / パス配下）
+
+- **サブドメインのルート**（例: `https://usage.example.com/`）: そのまま
+  動きます。追加設定は不要です。
+- **パス配下**（例: `https://ai.example.com/usage/`）: Cloudflare Tunnel は
+  パスを剥がさないため、リクエストは `/usage/healthz` の形でアプリに届き
+  ます。アプリはプレフィックスを検出して剥がすので、この形でも動きます。
+  - 検出は自動です（先頭セグメントの次が既知ルートの場合に剥がす）。
+  - 確実に動かしたい場合は `.env` に `APP_BASE_PATH=/usage` を設定して
+    ください（自動検出より優先されます）。
+  - `X-Forwarded-Prefix` ヘッダが付いている場合もそれを使います。
+
 ## 起動手順
 
 ```bash

@@ -5,6 +5,13 @@
   /healthz のみ認証不要。
 - 起動時にコレクタのバックグラウンドタスクを開始し、
   COLLECT_INTERVAL_SEC（既定 300 秒）ごとにローカルログを走査する。
+- 公開パスのプレフィックス対応（サブドメイン / パス配下の両対応）:
+  サブドメインのルートで公開する場合はプレフィックスなしでそのまま動く。
+  パス配下（例 https://ai.nekono.dev/usage/）で公開する場合、Cloudflare
+  Tunnel はパスを剥がさないため /usage/healthz の形で届き、そのままだと
+  404 になる。BasePathMiddleware がプレフィックスを検出して剥がす。
+  検出の優先順位: 環境変数 APP_BASE_PATH > X-Forwarded-Prefix ヘッダ >
+  パス先頭セグメントの自動判定（次のセグメントが既知ルートの場合のみ）。
 """
 from __future__ import annotations
 
@@ -29,6 +36,59 @@ if not API_KEY:
 COLLECT_INTERVAL_SEC = int(os.environ.get("COLLECT_INTERVAL_SEC", "300"))
 
 app = FastAPI(title="ai-usage-aggregator", version="0.1.0")
+
+# アプリ自身のルートとして実在する先頭セグメント
+_KNOWN_ROOT_SEGMENTS = {"healthz", "v1", "docs", "redoc", "openapi.json"}
+
+
+class BasePathMiddleware:
+    """公開パスプレフィックス（例 /usage）を検出して剥がす ASGI ミドルウェア。
+
+    プレフィックスが分かった場合は scope["path"] を書き換え、
+    scope["root_path"] に積む（URL 生成・ドキュメント表示用）。
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") == "http":
+            prefix = self._detect_prefix(scope)
+            if prefix:
+                path = scope.get("path", "")
+                new_path = path[len(prefix):] or "/"
+                scope["path"] = new_path
+                if scope.get("raw_path"):
+                    scope["raw_path"] = new_path.encode("utf-8")
+                scope["root_path"] = scope.get("root_path", "") + prefix
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    def _detect_prefix(scope) -> str:
+        path = scope.get("path", "")
+        candidates = []
+        env_prefix = os.environ.get("APP_BASE_PATH", "").strip().rstrip("/")
+        if env_prefix:
+            candidates.append(env_prefix if env_prefix.startswith("/") else "/" + env_prefix)
+        for name, value in scope.get("headers", []):
+            if name == b"x-forwarded-prefix" and value:
+                fwd = value.decode("latin-1").strip().rstrip("/")
+                if fwd:
+                    candidates.append(fwd if fwd.startswith("/") else "/" + fwd)
+                break
+        for cand in candidates:
+            if path == cand or path.startswith(cand + "/"):
+                return cand
+        # 自動判定: 先頭セグメントが既知ルートではなく、次のセグメントが
+        # 既知ルートである場合に限り、先頭セグメントをプレフィックスとみなす
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[1] not in _KNOWN_ROOT_SEGMENTS \
+                and parts[2] in _KNOWN_ROOT_SEGMENTS:
+            return "/" + parts[1]
+        return ""
+
+
+app.add_middleware(BasePathMiddleware)
 
 
 def require_api_key(authorization: str | None = Header(default=None),
