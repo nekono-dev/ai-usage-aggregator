@@ -2,10 +2,14 @@ FROM python:3.13-slim
 
 ARG APP_UID=10001
 ARG APP_GID=10001
+# ビルド対象の git コミット。アプリの /v1/admin/status が version として返す
+ARG GIT_COMMIT=unknown
+ENV APP_VERSION=${GIT_COMMIT}
 
 # 名前付きボリュームの初期所有者を、実行ユーザーに合わせる。
 RUN test "$APP_UID" -gt 0 && test "$APP_GID" -gt 0 \
-    && install -d -m 0750 -o "$APP_UID" -g "$APP_GID" /data
+    && install -d -m 0750 -o "$APP_UID" -g "$APP_GID" /data \
+    && install -d -m 0750 -o "$APP_UID" -g "$APP_GID" /control
 
 WORKDIR /app
 

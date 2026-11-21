@@ -12,13 +12,27 @@
   404 になる。BasePathMiddleware がプレフィックスを検出して剥がす。
   検出の優先順位: 環境変数 APP_BASE_PATH > X-Forwarded-Prefix ヘッダ >
   パス先頭セグメントの自動判定（次のセグメントが既知ルートの場合のみ）。
+- 管理 API（/v1/admin/*、同じ API キー認証）:
+  稼働状態の取得、ログ収集の即時実行、DB バックアップ、メンテナンス
+  モード切替、更新リクエストの記録を行う。アプリ自身はコンテナを
+  操作しない。更新リクエストは CONTROL_DIR（既定 /control）の
+  update-request.json に記録するだけで、実際の git pull / 再ビルド /
+  再起動は updater サイドカーが実行し、結果を update-status.json に
+  書き戻す。メンテナンスモードは maintenance.json で保持し、有効中は
+  /healthz と /v1/admin/* 以外へ 503 を返す。
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import secrets
-from datetime import date, timedelta
+import sqlite3
+import time
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -35,7 +49,35 @@ if not API_KEY:
 
 COLLECT_INTERVAL_SEC = int(os.environ.get("COLLECT_INTERVAL_SEC", "300"))
 
+# ビルド時に Dockerfile の ARG GIT_COMMIT から埋め込まれる
+APP_VERSION = os.environ.get("APP_VERSION", "unknown")
+# updater サイドカーとの制御ファイル受け渡し用ディレクトリ
+CONTROL_DIR = Path(os.environ.get("CONTROL_DIR", "/control"))
+STARTED_AT = time.time()
+REQUEST_TTL_SEC = 600  # 更新リクエストの有効期限（updater 側と合わせる）
+
+_LAST_COLLECT: dict = {"at": None, "result": None}
+
 app = FastAPI(title="ai-usage-aggregator", version="0.1.0")
+
+
+def _read_json_file(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _maintenance_enabled() -> bool:
+    state = _read_json_file(CONTROL_DIR / "maintenance.json")
+    return bool(state and state.get("enabled"))
 
 # アプリ自身のルートとして実在する先頭セグメント
 _KNOWN_ROOT_SEGMENTS = {"healthz", "v1", "docs", "redoc", "openapi.json"}
@@ -61,6 +103,17 @@ class BasePathMiddleware:
                 if scope.get("raw_path"):
                     scope["raw_path"] = new_path.encode("utf-8")
                 scope["root_path"] = scope.get("root_path", "") + prefix
+            # メンテナンスモード中は /healthz と管理 API 以外を止める。
+            # プレフィックス剥がし後のパスで判定する
+            effective_path = scope.get("path", "")
+            if _maintenance_enabled() and effective_path != "/healthz" \
+                    and not effective_path.startswith("/v1/admin"):
+                body = json.dumps({"detail": "maintenance mode"}).encode("utf-8")
+                await send({"type": "http.response.start", "status": 503,
+                            "headers": [(b"content-type", b"application/json"),
+                                        (b"content-length", str(len(body)).encode())]})
+                await send({"type": "http.response.body", "body": body})
+                return
         await self.app(scope, receive, send)
 
     @staticmethod
@@ -126,7 +179,9 @@ async def _startup() -> None:
 async def _collect_loop() -> None:
     while True:
         try:
-            await asyncio.to_thread(collector.collect_once)
+            result = await asyncio.to_thread(collector.collect_once)
+            _LAST_COLLECT.update(
+                at=datetime.now(timezone.utc).isoformat(), result=result)
         except Exception:
             pass  # コレクタの失敗で API 本体を落とさない
         await asyncio.sleep(COLLECT_INTERVAL_SEC)
@@ -222,3 +277,143 @@ def summary() -> dict:
         return {"from": d_from, "to": d_to, "total": total, "by_model": models}
 
     return {"note": COST_NOTE, "last_7d": window(7), "last_30d": window(30)}
+
+
+# ---------------------------------------------------------------- 管理 API
+
+_ADMIN = [Depends(require_api_key)]
+
+
+def _pending_request() -> dict | None:
+    req = _read_json_file(CONTROL_DIR / "update-request.json")
+    if not req:
+        return None
+    if time.time() - float(req.get("requested_at", 0)) > REQUEST_TTL_SEC:
+        return None  # 失効したリクエストは保留扱いにしない
+    return req
+
+
+@app.get("/v1/admin/status", dependencies=_ADMIN)
+def admin_status() -> dict:
+    db_path = Path(store.DB_PATH)
+    records = None
+    if db_path.exists():
+        with store.connect() as conn:
+            records = conn.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0]
+    return {
+        "version": APP_VERSION,
+        "started_at": datetime.fromtimestamp(STARTED_AT, timezone.utc).isoformat(),
+        "uptime_sec": int(time.time() - STARTED_AT),
+        "db": {
+            "path": str(db_path),
+            "size_bytes": db_path.stat().st_size if db_path.exists() else 0,
+            "records": records,
+        },
+        "collector": {
+            "configured": bool(collector.configured_dirs()),
+            "interval_sec": COLLECT_INTERVAL_SEC,
+            "last_collect": _LAST_COLLECT,
+        },
+        "maintenance": _maintenance_enabled(),
+        "update": {
+            "pending_request": _pending_request(),
+            "last_status": _read_json_file(CONTROL_DIR / "update-status.json"),
+        },
+    }
+
+
+@app.post("/v1/admin/collect", dependencies=_ADMIN)
+def admin_collect() -> dict:
+    if not collector.configured_dirs():
+        raise HTTPException(status_code=400, detail="LOG_DIRS が未設定です")
+    result = collector.collect_once()
+    _LAST_COLLECT.update(at=datetime.now(timezone.utc).isoformat(), result=result)
+    return {"collected": result}
+
+
+def _backup_dir() -> Path:
+    return Path(store.DB_PATH).parent / "backups"
+
+
+@app.post("/v1/admin/backup", dependencies=_ADMIN)
+def admin_backup() -> dict:
+    backup_dir = _backup_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    name = "usage-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + ".db"
+    dest_path = backup_dir / name
+    src = store.connect()
+    try:
+        dest = sqlite3.connect(dest_path)
+        try:
+            src.backup(dest)
+        finally:
+            dest.close()
+    finally:
+        src.close()
+    return {"name": name, "size_bytes": dest_path.stat().st_size,
+            "created_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/v1/admin/backups", dependencies=_ADMIN)
+def admin_backups() -> dict:
+    backup_dir = _backup_dir()
+    items = []
+    if backup_dir.exists():
+        for f in sorted(backup_dir.glob("*.db"), reverse=True):
+            items.append({"name": f.name, "size_bytes": f.stat().st_size,
+                          "modified_at": datetime.fromtimestamp(
+                              f.stat().st_mtime, timezone.utc).isoformat()})
+    return {"backups": items}
+
+
+class MaintenanceIn(BaseModel):
+    enabled: bool
+
+
+@app.post("/v1/admin/maintenance", dependencies=_ADMIN)
+def admin_maintenance(body: MaintenanceIn) -> dict:
+    state = {"enabled": body.enabled,
+             "updated_at": datetime.now(timezone.utc).isoformat()}
+    _write_json_atomic(CONTROL_DIR / "maintenance.json", state)
+    return state
+
+
+@app.get("/v1/admin/maintenance", dependencies=_ADMIN)
+def admin_maintenance_state() -> dict:
+    return {"enabled": _maintenance_enabled()}
+
+
+_ALLOWED_REF = re.compile(r"^(main|develop|v\d+\.\d+\.\d+)$")
+
+
+class UpdateIn(BaseModel):
+    ref: str = "main"
+
+
+@app.post("/v1/admin/update", dependencies=_ADMIN)
+def admin_update(body: UpdateIn) -> dict:
+    if not _ALLOWED_REF.match(body.ref):
+        raise HTTPException(status_code=422,
+                            detail="ref は main / develop / vX.Y.Z のみ許可されます")
+    pending = _pending_request()
+    if pending:
+        raise HTTPException(status_code=409, detail={
+            "message": "更新リクエストが既に保留中です",
+            "request_id": pending.get("request_id")})
+    req = {
+        "request_id": uuid.uuid4().hex,
+        "ref": body.ref,
+        "requested_at": time.time(),
+        "requested_at_iso": datetime.now(timezone.utc).isoformat(),
+        "current_version": APP_VERSION,
+    }
+    _write_json_atomic(CONTROL_DIR / "update-request.json", req)
+    return {"request_id": req["request_id"], "ref": body.ref, "status": "pending"}
+
+
+@app.get("/v1/admin/update", dependencies=_ADMIN)
+def admin_update_state() -> dict:
+    return {
+        "pending_request": _pending_request(),
+        "last_status": _read_json_file(CONTROL_DIR / "update-status.json"),
+    }
