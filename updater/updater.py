@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -44,6 +45,55 @@ HISTORY_DIR = CONTROL_DIR / "history"
 
 _ALLOWED_REF = re.compile(r"^(main|develop|v\d+\.\d+\.\d+)$")
 _GIT = ["git", "-c", f"safe.directory={PROJECT_DIR}", "-C", str(PROJECT_DIR)]
+
+# git / ssh 実行用のステージング HOME。
+# コンテナは root で動くため、ホストユーザーの所有する ~/.ssh を直接使うと
+# OpenSSH が所有者不一致で config と鍵を無視する（"Bad owner or permissions"）。
+# そこでマウントされた ~/.ssh を root 所有・厳密なパーミッションで
+# コピーし直し、パス参照も書き換えたうえで、git の HOME として使う。
+STAGE_HOME = Path("/tmp/updater-home")
+_git_env: dict = {}
+
+
+def prepare_git_env() -> dict:
+    """マウントされた実行ユーザーの ~/.ssh をステージングして git 用 env を返す。"""
+    src_home = Path(os.environ.get("SOURCE_HOME") or os.environ.get("HOME", "/root"))
+    staged: dict = {}
+    try:
+        src_ssh = src_home / ".ssh"
+        if src_ssh.is_dir():
+            dst_ssh = STAGE_HOME / ".ssh"
+            if dst_ssh.exists():
+                shutil.rmtree(dst_ssh)
+            STAGE_HOME.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(src_ssh, dst_ssh, symlinks=False)
+            dst_ssh.chmod(0o700)
+            for item in dst_ssh.rglob("*"):
+                if item.is_file():
+                    item.chmod(0o644 if item.suffix == ".pub" else 0o600)
+            config = dst_ssh / "config"
+            if config.exists():
+                config.write_text(
+                    config.read_text(encoding="utf-8", errors="replace")
+                    .replace(str(src_home), str(STAGE_HOME)),
+                    encoding="utf-8")
+            staged["HOME"] = str(STAGE_HOME)
+        src_gitconfig = src_home / ".gitconfig"
+        if src_gitconfig.is_file():
+            dst_gitconfig = STAGE_HOME / ".gitconfig"
+            STAGE_HOME.mkdir(parents=True, exist_ok=True)
+            dst_gitconfig.write_text(
+                src_gitconfig.read_text(encoding="utf-8", errors="replace")
+                .replace(str(src_home), str(STAGE_HOME)),
+                encoding="utf-8")
+            dst_gitconfig.chmod(0o600)
+            staged["HOME"] = str(STAGE_HOME)
+    except OSError as e:
+        log(f"ssh staging failed (continuing without it): {e}")
+        return {}
+    if staged:
+        log(f"staged ssh config from {src_home} into {STAGE_HOME}")
+    return staged
 
 
 def now_iso() -> str:
@@ -113,7 +163,7 @@ def run(cmd: list[str], env_extra: dict | None = None, timeout: int = 1800) -> t
 
 
 def git(*args: str) -> tuple[int, str]:
-    return run(_GIT + list(args), timeout=300)
+    return run(_GIT + list(args), env_extra=_git_env, timeout=300)
 
 
 def discover_project() -> str | None:
@@ -179,6 +229,8 @@ def build_and_restart(project: str, commit: str) -> tuple[bool, str]:
 
 
 def process_request(req: dict) -> None:
+    global _git_env
+    _git_env = prepare_git_env()
     request_id = str(req.get("request_id", ""))
     ref = str(req.get("ref", ""))
     if not _ALLOWED_REF.match(ref):

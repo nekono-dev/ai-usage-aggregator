@@ -62,8 +62,11 @@ services:
       # 動作確認用。1 のときは git / docker を実行せず成功扱いで状態だけ進める
       UPDATER_DRY_RUN: "${UPDATER_DRY_RUN:-}"
       # git の SSH 接続をホストの実行ユーザーと同じ設定で行うための指定。
-      # ~/.ssh 内の config（Host エイリアス等）と鍵を、そのままのパスで参照する
+      # ~/.ssh はそのままのパスでマウントし、updater が起動時に所有者を
+      # 揃えたコピーを作ってそちらを使う（OpenSSH は所有者の違う config と
+      # 鍵を無視するため）。SOURCE_HOME はコピー元の特定用
       HOME: "${HOME}"
+      SOURCE_HOME: "${HOME}"
       GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts"
     volumes:
       - control:/control
