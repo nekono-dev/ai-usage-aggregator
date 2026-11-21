@@ -8,8 +8,12 @@
 - CONTROL_DIR（アプリと共有するボリューム）の update-request.json を監視
 - リクエストが来たら固定手順のみ実行する（任意コマンド実行はしない）
   1. 稼働中アプリのコンテナラベルから compose プロジェクト名を特定
-  2. git fetch して対象 ref（main / develop / vX.Y.Z のみ）をチェックアウト
-  3. docker compose build app（GIT_COMMIT を埋め込み）→ up -d app
+  2. git fetch して対象 ref（main / develop / vX.Y.Z のみ）をチェックアウト。
+     ブランチは pull --ff-only を試み、分岐していたら（履歴の書き換え等）
+     origin の向き先へ reset --hard で自動追従する
+  3. docker compose build app（GIT_COMMIT を埋め込み）→ up -d app。
+     compose はプロジェクトディレクトリを cwd にして実行し、ログ
+     ディレクトリのマウント元は稼働中コンテナから引き継ぐ
   4. /healthz で疎通確認。失敗したら旧コミットへ戻して再ビルド（ロールバック）
 - 進行状況と結果は update-status.json に書き、アプリの管理 API から読める
 - 処理済みリクエストは history/ へ移し、同じ request_id は二度実行しない
@@ -160,11 +164,13 @@ def archive_request(request_id: str) -> None:
         log(f"archive failed: {e}")
 
 
-def run(cmd: list[str], env_extra: dict | None = None, timeout: int = 1800) -> tuple[int, str]:
+def run(cmd: list[str], env_extra: dict | None = None, timeout: int = 1800,
+        cwd: str | None = None) -> tuple[int, str]:
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          env=env, cwd=cwd)
     out = (proc.stdout + proc.stderr).strip()
     return proc.returncode, out[-500:]
 
@@ -173,17 +179,23 @@ def git(*args: str) -> tuple[int, str]:
     return run(_GIT + list(args), env_extra=_git_env, timeout=300)
 
 
+def _app_container() -> str | None:
+    code, out = run(["docker", "ps", "-q", "--filter",
+                     "label=com.docker.compose.service=app"], timeout=60)
+    if code != 0 or not out:
+        return None
+    return out.splitlines()[0].strip()
+
+
 def discover_project() -> str | None:
     """稼働中 app コンテナのラベルから compose プロジェクト名を特定する。
 
     プロジェクト名がずれると別プロジェクトとして作り直してしまうため、
     推測ではなく実行中コンテナの実績値を使う。
     """
-    code, out = run(["docker", "ps", "-q", "--filter",
-                     "label=com.docker.compose.service=app"], timeout=60)
-    if code != 0 or not out:
+    container = _app_container()
+    if not container:
         return None
-    container = out.splitlines()[0].strip()
     code, out = run(["docker", "inspect", "--format",
                      "{{ index .Config.Labels \"com.docker.compose.project\" }}",
                      container], timeout=60)
@@ -192,9 +204,42 @@ def discover_project() -> str | None:
     return out.strip() or None
 
 
+# compose ファイルのログディレクトリは ${CLAUDE_LOG_DIR:-./logs/claude} の
+# ように相対パスが既定で、updater 内から compose を実行すると解決先が
+# ずれる。稼働中コンテナの実マウント元（ホスト絶対パス）を環境変数で
+# 明示し、再作成後も同じマウントになるよう引き継ぐ。
+_LOG_MOUNT_ENVS = {"/logs/claude": "CLAUDE_LOG_DIR",
+                   "/logs/codex": "CODEX_LOG_DIR",
+                   "/logs/pi": "PI_LOG_DIR"}
+_RUNTIME_ENV: dict = {}
+
+
+def discover_log_env() -> dict:
+    container = _app_container()
+    if not container:
+        return {}
+    code, out = run(["docker", "inspect", "--format", "{{ json .Mounts }}",
+                     container], timeout=60)
+    if code != 0:
+        return {}
+    try:
+        mounts = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    envs = {}
+    for m in mounts:
+        var = _LOG_MOUNT_ENVS.get(m.get("Destination", ""))
+        if var and m.get("Source"):
+            envs[var] = m["Source"]
+    return envs
+
+
 def compose(project: str, *args: str, env_extra: dict | None = None) -> tuple[int, str]:
+    merged = dict(_RUNTIME_ENV)
+    if env_extra:
+        merged.update(env_extra)
     return run(["docker", "compose", "-p", project, *args],
-               env_extra=env_extra, timeout=1800)
+               env_extra=merged, timeout=1800, cwd=str(PROJECT_DIR))
 
 
 def wait_health() -> bool:
@@ -210,16 +255,33 @@ def wait_health() -> bool:
     return False
 
 
-def checkout_ref(ref: str) -> tuple[int, str]:
+def checkout_ref(ref: str) -> tuple[int, str, str]:
+    """ref をチェックアウトし、(終了コード, 出力, 補足) を返す。
+
+    ブランチは通常 pull --ff-only で進める。リモート側の履歴が書き換え
+    られて分岐していた場合は、デプロイ専用クローンである前提で
+    origin/<ref> へ reset --hard して自動追従する（補足にその旨を返す）。
+    ロールバックは呼び出し側が旧 HEAD を保持して行うため、reset しても
+    旧コミットへは戻れる。
+    """
     code, out = git("fetch", "--tags", "origin")
     if code != 0:
-        return code, out
+        return code, out, ""
     if ref in ("main", "develop"):
         code, out = git("checkout", ref)
         if code != 0:
-            return code, out
-        return git("pull", "--ff-only", "origin", ref)
-    return git("checkout", f"refs/tags/{ref}")
+            return code, out, ""
+        code, out = git("pull", "--ff-only", "origin", ref)
+        if code == 0:
+            return 0, out, ""
+        log(f"pull --ff-only failed for {ref} (diverged?); "
+            f"resetting to origin/{ref}")
+        code, out = git("reset", "--hard", f"origin/{ref}")
+        if code == 0:
+            return 0, out, f"followed origin/{ref} by reset (history diverged)"
+        return code, out, ""
+    code, out = git("checkout", f"refs/tags/{ref}")
+    return code, out, ""
 
 
 def build_and_restart(project: str, commit: str) -> tuple[bool, str]:
@@ -236,7 +298,7 @@ def build_and_restart(project: str, commit: str) -> tuple[bool, str]:
 
 
 def process_request(req: dict) -> None:
-    global _git_env
+    global _git_env, _RUNTIME_ENV
     _git_env = prepare_git_env()
     request_id = str(req.get("request_id", ""))
     ref = str(req.get("ref", ""))
@@ -255,12 +317,13 @@ def process_request(req: dict) -> None:
         set_status(request_id, "failed", ref=ref,
                    detail="could not discover compose project from running app container")
         return
+    _RUNTIME_ENV = discover_log_env()
     code, prev = git("rev-parse", "HEAD")
     if code != 0:
         set_status(request_id, "failed", ref=ref, detail=f"rev-parse failed: {prev}")
         return
     prev = prev.strip()
-    code, out = checkout_ref(ref)
+    code, out, note = checkout_ref(ref)
     if code != 0:
         set_status(request_id, "failed", ref=ref, detail=f"checkout failed: {out}")
         return
@@ -272,8 +335,9 @@ def process_request(req: dict) -> None:
         return
     ok, detail = build_and_restart(project, new[:12])
     if ok:
+        extra = {"detail": note} if note else {}
         set_status(request_id, "done", ref=ref,
-                   from_version=prev, to_version=new)
+                   from_version=prev, to_version=new, **extra)
         return
     # ロールバック: 旧コミットへ戻して再ビルド
     log(f"update failed ({detail}); rolling back to {prev}")
