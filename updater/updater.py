@@ -77,6 +77,13 @@ def prepare_git_env() -> dict:
                     config.read_text(encoding="utf-8", errors="replace")
                     .replace(str(src_home), str(STAGE_HOME)),
                     encoding="utf-8")
+                # $HOME 経由の config 参照は実行環境（setuid や passwd の
+                # ホーム参照）で効かないことがあるため、ssh には -F で
+                # ステージングした config を明示的に渡す
+                staged["GIT_SSH_COMMAND"] = (
+                    f"ssh -F {dst_ssh}/config"
+                    " -o StrictHostKeyChecking=accept-new"
+                    f" -o UserKnownHostsFile={STAGE_HOME}/known_hosts")
             staged["HOME"] = str(STAGE_HOME)
         src_gitconfig = src_home / ".gitconfig"
         if src_gitconfig.is_file():
