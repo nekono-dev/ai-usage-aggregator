@@ -20,6 +20,11 @@
   再起動は updater サイドカーが実行し、結果を update-status.json に
   書き戻す。メンテナンスモードは maintenance.json で保持し、有効中は
   /healthz と /v1/admin/* 以外へ 503 を返す。
+- API 計測（公式 Admin API 同期）:
+  ANTHROPIC_ADMIN_KEY / OPENAI_ADMIN_KEY が設定されている場合、
+  プロバイダ公式の Usage / Cost API を定期同期し、API 利用の実績を
+  ローカルログ計測とは別テーブル（api_usage_daily / api_cost_daily）に
+  蓄積する。API 課金の利用は両方に現れうるため合算はしない（公式が正本）。
 """
 from __future__ import annotations
 
@@ -37,7 +42,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import collector, prices, store
+from . import collector, prices, provider_sync, store
 
 COST_NOTE = ("api_equivalent_cost_usd は API リスト価格で換算した参考値。"
              "billing=subscription の利用はサブスクリプション契約の枠消費であり、"
@@ -48,6 +53,7 @@ if not API_KEY:
     raise RuntimeError("APP_API_KEY が未設定です。環境変数で API キーを設定してください。")
 
 COLLECT_INTERVAL_SEC = int(os.environ.get("COLLECT_INTERVAL_SEC", "300"))
+PROVIDER_SYNC_INTERVAL_SEC = int(os.environ.get("PROVIDER_SYNC_INTERVAL_SEC", "3600"))
 
 # ビルド時に Dockerfile の ARG GIT_COMMIT から埋め込まれる
 APP_VERSION = os.environ.get("APP_VERSION", "unknown")
@@ -57,6 +63,7 @@ STARTED_AT = time.time()
 REQUEST_TTL_SEC = 600  # 更新リクエストの有効期限（updater 側と合わせる）
 
 _LAST_COLLECT: dict = {"at": None, "result": None}
+_LAST_SYNC: dict = {"at": None, "result": None}
 
 app = FastAPI(title="ai-usage-aggregator", version="0.1.0")
 
@@ -174,6 +181,8 @@ async def _startup() -> None:
     store.init_db()
     if collector.configured_dirs():
         asyncio.create_task(_collect_loop())
+    if provider_sync.configured_providers():
+        asyncio.create_task(_sync_loop())
 
 
 async def _collect_loop() -> None:
@@ -185,6 +194,17 @@ async def _collect_loop() -> None:
         except Exception:
             pass  # コレクタの失敗で API 本体を落とさない
         await asyncio.sleep(COLLECT_INTERVAL_SEC)
+
+
+async def _sync_loop() -> None:
+    while True:
+        try:
+            result = await asyncio.to_thread(provider_sync.sync_once)
+            _LAST_SYNC.update(
+                at=datetime.now(timezone.utc).isoformat(), result=result)
+        except Exception:
+            pass  # 同期の失敗で API 本体を落とさない
+        await asyncio.sleep(PROVIDER_SYNC_INTERVAL_SEC)
 
 
 @app.get("/healthz")
@@ -276,7 +296,65 @@ def summary() -> dict:
             sum(m["api_equivalent_cost_usd"] for m in models if m["billing"] == "api"), 6)
         return {"from": d_from, "to": d_to, "total": total, "by_model": models}
 
-    return {"note": COST_NOTE, "last_7d": window(7), "last_30d": window(30)}
+    return {"note": COST_NOTE, "last_7d": window(7), "last_30d": window(30),
+            "api_note": API_NOTE,
+            "api_official": {
+                "configured_providers": provider_sync.configured_providers(),
+                "last_7d": _api_window(7),
+                "last_30d": _api_window(30),
+            }}
+
+
+API_NOTE = ("api_official はプロバイダ公式 Admin API の同期値（UTC 日次、"
+            "実コストは USD 実績）。ローカルログ計測（サブスクリプション利用）"
+            "とは別プレーンであり、合算しないこと。")
+
+
+def _api_window(days: int) -> dict:
+    today_utc = datetime.now(timezone.utc).date()
+    d_from = (today_utc - timedelta(days=days - 1)).isoformat()
+    d_to = today_utc.isoformat()
+    providers = store.api_totals_by_provider(d_from, d_to)
+    for p in providers:
+        p["total_tokens"] = (p["input_tokens"] + p["output_tokens"]
+                             + p["cache_read_tokens"] + p["cache_write_tokens"])
+    total = {
+        "input_tokens": sum(p["input_tokens"] for p in providers),
+        "output_tokens": sum(p["output_tokens"] for p in providers),
+        "cache_read_tokens": sum(p["cache_read_tokens"] for p in providers),
+        "cache_write_tokens": sum(p["cache_write_tokens"] for p in providers),
+        "requests": sum(p["requests"] for p in providers),
+        "cost_usd": round(sum(p["cost_usd"] for p in providers), 6),
+    }
+    total["total_tokens"] = (total["input_tokens"] + total["output_tokens"]
+                             + total["cache_read_tokens"] + total["cache_write_tokens"])
+    return {"from": d_from, "to": d_to, "total": total, "by_provider": providers}
+
+
+@app.get("/v1/api-usage", dependencies=[Depends(require_api_key)])
+def api_usage(date_from: str | None = Query(default=None, alias="from"),
+              date_to: str | None = Query(default=None, alias="to"),
+              group_by: str = Query(default="day",
+                                    pattern="^(day|model|provider)$")) -> dict:
+    today_utc = datetime.now(timezone.utc).date()
+    d_to = date_to or today_utc.isoformat()
+    d_from = date_from or (today_utc - timedelta(days=29)).isoformat()
+    groups = store.api_usage_aggregate(d_from, d_to, group_by)
+    for g in groups:
+        g["total_tokens"] = (g["input_tokens"] + g["output_tokens"]
+                             + g["cache_read_tokens"] + g["cache_write_tokens"])
+    providers = store.api_totals_by_provider(d_from, d_to)
+    return {
+        "from": d_from, "to": d_to, "group_by": group_by, "note": API_NOTE,
+        "configured_providers": provider_sync.configured_providers(),
+        "token_groups": groups,
+        "cost": {
+            "total_usd": round(sum(p["cost_usd"] for p in providers), 6),
+            "by_provider": [{"provider": p["provider"], "amount_usd": p["cost_usd"]}
+                            for p in providers],
+            "by_day": store.api_cost_by_day(d_from, d_to),
+        },
+    }
 
 
 # ---------------------------------------------------------------- 管理 API
@@ -314,6 +392,11 @@ def admin_status() -> dict:
             "interval_sec": COLLECT_INTERVAL_SEC,
             "last_collect": _LAST_COLLECT,
         },
+        "provider_sync": {
+            "configured_providers": provider_sync.configured_providers(),
+            "interval_sec": PROVIDER_SYNC_INTERVAL_SEC,
+            "last_sync": _LAST_SYNC,
+        },
         "maintenance": _maintenance_enabled(),
         "update": {
             "pending_request": _pending_request(),
@@ -329,6 +412,16 @@ def admin_collect() -> dict:
     result = collector.collect_once()
     _LAST_COLLECT.update(at=datetime.now(timezone.utc).isoformat(), result=result)
     return {"collected": result}
+
+
+@app.post("/v1/admin/sync", dependencies=_ADMIN)
+def admin_sync() -> dict:
+    if not provider_sync.configured_providers():
+        raise HTTPException(status_code=400,
+                            detail="Admin キー（ANTHROPIC_ADMIN_KEY / OPENAI_ADMIN_KEY）が未設定です")
+    result = provider_sync.sync_once()
+    _LAST_SYNC.update(at=datetime.now(timezone.utc).isoformat(), result=result)
+    return {"synced": result}
 
 
 def _backup_dir() -> Path:
