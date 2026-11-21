@@ -5,6 +5,9 @@ services:
       args:
         APP_UID: ${APP_UID:-10001}
         APP_GID: ${APP_GID:-10001}
+        # 稼働バージョンとして /v1/admin/status に出す。通常は updater が
+        # ビルド時に自動で埋めるため、手動ビルド時だけ指定すればよい
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     read_only: true
     cap_drop:
       - ALL
@@ -18,8 +21,11 @@ services:
       # パス配下で公開する場合のみ設定する（例: /usage）。サブドメインの
       # ルートで公開する場合は空のまま。未設定でもアプリが自動検出する
       APP_BASE_PATH: "${APP_BASE_PATH:-}"
+      # updater サイドカーとの制御ファイル受け渡し用
+      CONTROL_DIR: /control
     volumes:
       - usage-data:/data
+      - control:/control
       # エージェントCLIのセッションログは読み取り専用でマウントする
       - ${CLAUDE_LOG_DIR:-./logs/claude}:/logs/claude:ro
       - ${CODEX_LOG_DIR:-./logs/codex}:/logs/codex:ro
@@ -43,5 +49,26 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # セルフアップデートの実行役。docker.sock を持つのはこのコンテナだけ。
+  # ネットワークの受付はせず、アプリが control ボリュームに書いた
+  # 更新リクエスト（固定手順のみ）を実行する。
+  updater:
+    build:
+      context: ./updater
+    environment:
+      CONTROL_DIR: /control
+      PROJECT_DIR: /project
+      APP_HEALTH_URL: http://app:8000/healthz
+      # 動作確認用。1 のときは git / docker を実行せず成功扱いで状態だけ進める
+      UPDATER_DRY_RUN: "${UPDATER_DRY_RUN:-}"
+    volumes:
+      - control:/control
+      # デプロイ用チェックアウトそのものをマウントする（git pull の対象）
+      - .:/project
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - app
+
 volumes:
   usage-data:
+  control:

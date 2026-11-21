@@ -159,6 +159,51 @@ cache_read / cache_write、USD/1Mトークン）で計算します。単価表�
 換算した**参考値**です。サブスク利用分を「API で処理した場合いくらか」の
 比較に使うためのもので、実際の支出ではありません。
 
+### 管理 API（/v1/admin/*）
+
+運用・メンテナンス用です。認証は通常の API と同じキーです。
+
+- `GET /v1/admin/status` : 稼働中バージョン（ビルド時の git コミット）、
+  DB のレコード数とサイズ、最終収集時刻、メンテナンス状態、更新状況
+- `POST /v1/admin/collect` : ログ収集を即時実行
+- `POST /v1/admin/backup` : SQLite のバックアップを DB と同じボリュームの
+  `backups/` に作成。`GET /v1/admin/backups` で一覧
+- `POST /v1/admin/maintenance` `{"enabled": true|false}` :
+  メンテナンスモード切替。有効中は `/healthz` と管理 API 以外に 503 を返す
+- `POST /v1/admin/update` `{"ref": "main"}` : 更新リクエストを記録する
+  （`ref` は `main` / `develop` / `vX.Y.Z` のみ）。実際の更新は updater が実行
+- `GET /v1/admin/update` : 保留中のリクエストと直近の更新結果
+
+## セルフアップデート（updater サイドカー）
+
+アプリ本体は最小権限（非root、read_only、cap_drop ALL）を維持し、
+コンテナの再作成が要る処理は専任の updater コンテナが担います。
+
+1. 管理 API で更新リクエストを受けると、アプリは共有ボリューム
+   （`control`）の `update-request.json` に意図を記録するだけです
+2. updater がそれを検出し、固定手順のみを実行します:
+   稼働中コンテナのラベルから compose プロジェクト名を特定 →
+   `git fetch` して対象 ref をチェックアウト → `docker compose build app`
+   （コミットハッシュをバージョンとして埋め込み）→ `docker compose up -d app`
+   → `/healthz` で疎通確認
+3. 疎通に失敗したら旧コミットへ戻して再ビルドし、自動でロールバックします
+4. 進行と結果は `update-status.json` に書かれ、`GET /v1/admin/status` や
+   `GET /v1/admin/update` から確認できます。処理済みリクエストは
+   `control/history/` に残ります
+
+安全策:
+
+- docker.sock を持つのは updater だけです。updater はネットワークの
+  受付を一切せず、任意コマンド実行の口もありません
+- 更新対象は `main` / `develop` / `vX.Y.Z` タグのみ。同時実行はなく、
+  リクエストは10分で失効します
+- デプロイ用チェックアウトは updater が `git checkout` で切り替えます。
+  開発用クローンとは別に、デプロイ専用のクローンを使ってください
+- この機能の初回有効化だけは手動です（`git pull` して
+  `docker compose up -d --build`）。以降の更新はリクエスト経由でできます
+- 動作確認だけしたい場合は `.env` に `UPDATER_DRY_RUN=1` を設定すると、
+  updater が git / docker を実行せず成功扱いで状態だけ進めます
+
 ## ログの取り込み仕様
 
 アプリ起動中、`COLLECT_INTERVAL_SEC`（既定300秒）ごとに
