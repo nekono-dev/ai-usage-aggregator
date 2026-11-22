@@ -143,7 +143,10 @@ curl -H "Authorization: Bearer $APP_API_KEY" https://usage.example.com/v1/summar
 
 概算コストは `app/prices.py` の単価表（モデルごとの input / output /
 cache_read / cache_write、USD/1Mトークン）で計算します。単価表に無いモデルは
-コスト 0 になり、`price_known: false` が付きます。
+ファミリー別の代替単価（Claude 系は Sonnet、GPT / Codex 系は Sol の単価）で
+計算し、モデル別の内訳には `price_source: "fallback"` が付きます（単価表の
+単価で計算した場合は `"table"`）。コスト 0 のまま集計から漏れるモデルは
+ありません。
 
 ### 課金種別（billing）とコストの意味
 

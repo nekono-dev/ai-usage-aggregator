@@ -221,7 +221,7 @@ def post_records(body: UsageRecordIn | list[UsageRecordIn]) -> dict:
 
 
 def _with_cost(row: dict) -> dict:
-    cost, known = prices.estimate_cost(
+    cost, source = prices.estimate_cost(
         row["model"], row["input_tokens"], row["output_tokens"],
         row["cache_read_tokens"], row["cache_write_tokens"])
     row = dict(row)
@@ -229,7 +229,7 @@ def _with_cost(row: dict) -> dict:
                            + row["cache_read_tokens"] + row["cache_write_tokens"])
     # API リスト価格での換算値。billing=subscription の場合は実際の請求ではない
     row["api_equivalent_cost_usd"] = round(cost, 6)
-    row["price_known"] = known  # False のモデルは単価不明（コスト 0 として扱う）
+    row["price_source"] = source  # "table" = 単価表の単価、"fallback" = 代替単価
     return row
 
 
@@ -244,7 +244,7 @@ def report(date_from: str | None = Query(default=None, alias="from"),
     # (グループ, model, billing) 単位の行を、モデル別単価でコスト換算してから合算する
     grouped: dict[str, dict] = {}
     for row in store.aggregate(d_from, d_to, group_by):
-        cost, _known = prices.estimate_cost(
+        cost, _source = prices.estimate_cost(
             row["model"], row["input_tokens"], row["output_tokens"],
             row["cache_read_tokens"], row["cache_write_tokens"])
         g = grouped.setdefault(row["grp"], {
