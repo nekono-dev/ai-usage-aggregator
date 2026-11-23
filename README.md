@@ -69,11 +69,18 @@ sudo usermod -aG docker $USER   # 再ログイン後に有効
 
 ## 起動手順
 
+簡単な導入には `./install.sh`（clone、.env 生成、起動、
+ヘルスチェックまで）があります。AI エージェントに対話形式で
+導入・保守を任せる場合は `docs/agent-setup.md` が手順書です。
+
+手動の場合は:
+
 ```bash
 cp .env.example .env
 # .env を編集: APP_API_KEY（openssl rand -hex 32 で生成）、TUNNEL_TOKEN、
 # CLAUDE_LOG_DIR / CODEX_LOG_DIR / PI_LOG_DIR（ホスト側の実パス）、
-# APP_UID / APP_GID（ログの所有ユーザーで実行した id -u / id -g）
+# APP_UID / APP_GID（ログの所有ユーザーで実行した id -u / id -g）。
+# GIT_REPO_URL は未指定でよい（公式リポジトリから取得する。認証不要）
 docker compose up -d --build
 docker compose ps        # app が healthy になることを確認
 docker compose logs -f app
@@ -143,7 +150,10 @@ curl -H "Authorization: Bearer $APP_API_KEY" https://usage.example.com/v1/summar
 
 概算コストは `app/prices.py` の単価表（モデルごとの input / output /
 cache_read / cache_write、USD/1Mトークン）で計算します。単価表に無いモデルは
-コスト 0 になり、`price_known: false` が付きます。
+ファミリー別の代替単価（Claude 系は Sonnet、GPT / Codex 系は Sol の単価）で
+計算し、モデル別の内訳には `price_source: "fallback"` が付きます（単価表の
+単価で計算した場合は `"table"`）。コスト 0 のまま集計から漏れるモデルは
+ありません。
 
 ### 課金種別（billing）とコストの意味
 
@@ -158,6 +168,50 @@ cache_read / cache_write、USD/1Mトークン）で計算します。単価表�
 レスポンスの `api_equivalent_cost_usd` は、全レコードを API リスト価格で
 換算した**参考値**です。サブスク利用分を「API で処理した場合いくらか」の
 比較に使うためのもので、実際の支出ではありません。
+
+### GET /v1/api-usage?from=YYYY-MM-DD&to=YYYY-MM-DD&group_by=day|model|provider
+
+公式 Admin API から同期した API 利用の実績（トークンと実コスト）を返します。
+詳細は次節。ローカルログ計測とは別プレーンで、合算はしません。
+
+`GET /v1/summary` にも `api_official` セクションとして直近7日 / 30日の
+プロバイダ別実績が入ります。
+
+## API 計測（公式 Admin API 同期）
+
+このアプリは2つの計測を持ち、混ぜません。
+
+- **サブスクリプション計測**: ローカルログのコレクタ（従来どおり）。
+  サブスクリプション契約の枠消費を測ります
+- **API 計測**: プロバイダ公式の Usage / Cost API を定期同期し、API 課金の
+  実績（トークン量と実コスト）を測ります。API 利用はローカルログにも
+  現れるため、同じ利用を二重に数えないよう保存先を分けています。
+  API 利用の正本は公式側です
+
+仕組み:
+
+- `.env` に `ANTHROPIC_ADMIN_KEY` / `OPENAI_ADMIN_KEY` を設定した
+  プロバイダだけが同期対象です（未設定なら同期しません）
+- 同期は起動時と `PROVIDER_SYNC_INTERVAL_SEC`（既定3600秒）ごと。
+  `POST /v1/admin/sync` でも即時実行できます
+- 毎回、直近 `PROVIDER_SYNC_DAYS`（既定35日）を取り直して upsert します。
+  公式コストは約24時間遅れて確定し、約30日遡って改訂されるためです
+- 日付はプロバイダのバケット（UTC の暦日）です。ローカルログ計測
+  （ローカル日付）とは最大で半日ほどずれます
+- 同期状態は `GET /v1/admin/status` の `provider_sync` で確認できます。
+  キー自体はどのレスポンスにも含まれません
+
+Admin キーについて:
+
+- Anthropic: Claude Console の組織設定で発行する Admin API キー
+  （`sk-ant-admin…`）。Usage は `/v1/organizations/usage_report/messages`、
+  Cost は `/v1/organizations/cost_report` を使います
+- OpenAI: platform.openai.com の Settings → Admin keys で発行する
+  Admin キー（`sk-admin…`）。Usage は `/v1/organization/usage/completions`、
+  Cost は `/v1/organization/costs` を使います
+- どちらのキーも組織の管理者権限で発行するもので、通常の API キーや
+  サブスクリプション契約（Claude Pro / ChatGPT Plus）だけでは読めません。
+  アプリのコンテナから両社の API へ外向き HTTPS が必要です
 
 ### 管理 API（/v1/admin/*）
 
@@ -183,9 +237,15 @@ cache_read / cache_write、USD/1Mトークン）で計算します。単価表�
    （`control`）の `update-request.json` に意図を記録するだけです
 2. updater がそれを検出し、固定手順のみを実行します:
    稼働中コンテナのラベルから compose プロジェクト名を特定 →
-   `git fetch` して対象 ref をチェックアウト → `docker compose build app`
-   （コミットハッシュをバージョンとして埋め込み）→ `docker compose up -d app`
-   → `/healthz` で疎通確認
+   専用ボリューム内の自前クローンを `git fetch` して対象 ref を
+   チェックアウト → `docker compose build app`（コミットハッシュを
+   バージョンとして埋め込み）→ `docker compose up -d app`
+   → `/healthz` で疎通確認。ブランチのチェックアウトは通常
+   `pull --ff-only` で進め、リモートの履歴が書き換えられて分岐していた
+   場合は `origin` の向き先へ `reset --hard` して自動追従します
+   （ロールバック用に旧コミットは保持されます）。compose は
+   プロジェクトディレクトリを cwd に実行し、ログディレクトリの
+   マウント元は稼働中コンテナから引き継ぎます
 3. 疎通に失敗したら旧コミットへ戻して再ビルドし、自動でロールバックします
 4. 進行と結果は `update-status.json` に書かれ、`GET /v1/admin/status` や
    `GET /v1/admin/update` から確認できます。処理済みリクエストは
@@ -197,21 +257,16 @@ cache_read / cache_write、USD/1Mトークン）で計算します。単価表�
   受付を一切せず、任意コマンド実行の口もありません
 - 更新対象は `main` / `develop` / `vX.Y.Z` タグのみ。同時実行はなく、
   リクエストは10分で失効します
-- デプロイ用チェックアウトは updater が `git checkout` で切り替えます。
-  開発用クローンとは別に、デプロイ専用のクローンを使ってください
-- この機能の初回有効化だけは手動です（`git pull` して
-  `docker compose up -d --build`）。以降の更新はリクエスト経由でできます
-- updater の git fetch は、デプロイ用チェックアウトのリモート設定を
-  そのまま使います。SSH リモートの場合は、compose 実行ユーザーの
-  `~/.ssh`（config と鍵）を読み取り専用で同一パスにマウントします。
-  updater はコンテナ内で root として動くため、マウントした config と
-  鍵をそのまま使うと OpenSSH が所有者不一致で無視します。そのため
-  updater は処理のたびに `~/.ssh` を所有者を揃えた専用コピーに
-  ステージングし、config 内のパス参照も書き換えてから使います
-  （`sudo` で compose を実行すると HOME が変わって鍵を
-  参照できないので、通常ユーザーで実行してください）。
-  HTTPS リモートの場合は、認証情報が同じパスで参照できるよう
-  ホスト側で資格情報を設定しておく必要があります
+- ソースは updater 専用ボリューム（`source`）内の自前クローンで管理
+  します。ホストのチェックアウトはブートストラップ専用で、updater は
+  それを切り替えません（手動の git 操作と競合しません）
+- クローンの取得元は `.env` の `GIT_REPO_URL`（未指定なら公式
+  リポジトリ）。このリポジトリは公開前提のため、clone / fetch に
+  認証情報は不要です
+- この機能の初回有効化と、updater 自体の更新だけは手動です
+  （ホストのチェックアウトで `git pull` して
+  `docker compose up -d --build updater`）。以降の app 更新は
+  リクエスト経由でできます
 - 動作確認だけしたい場合は `.env` に `UPDATER_DRY_RUN=1` を設定すると、
   updater が git / docker を実行せず成功扱いで状態だけ進めます
 
@@ -227,6 +282,12 @@ cache_read / cache_write、USD/1Mトークン）で計算します。単価表�
 
 重複排除はレコードの `source_id`（UNIQUE 制約）で行うため、再走査しても
 二重登録されません。
+
+## レポート生成
+
+実測データから日次テーブルと週次・月次グラフを生成するスクリプト
+（`report/usage_charts.py`）を同梱している。導入・生成・配信の手順は
+エージェント向けスキル `skills/usage-report/SKILL.md` に従う。
 
 ## セキュリティ注意
 
