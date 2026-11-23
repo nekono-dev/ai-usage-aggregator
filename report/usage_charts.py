@@ -196,6 +196,9 @@ document.querySelectorAll('[data-metric]').forEach(function (btn) {
     document.querySelectorAll('.chart-title').forEach(function (t) {
       t.textContent = key === 'tokens' ? '利用量' : '金額';
     });
+    document.querySelectorAll('[data-pie]').forEach(function (p) {
+      p.hidden = p.getAttribute('data-pie') !== key;
+    });
     document.querySelectorAll('[data-chart]').forEach(function (chart) {
       var rowsEl = chart.querySelector('.rows');
       var rows = Array.prototype.slice.call(rowsEl.children);
@@ -219,22 +222,23 @@ document.querySelectorAll('[data-metric]').forEach(function (btn) {
 </script>"""
 
 
-def pie_chart(window: dict, color_of: dict) -> str:
+def pie_chart(window: dict, color_of: dict, value_key: str = "total_tokens") -> str:
     """利用割合の円グラフ（モデル別スライス＋凡例）。
 
     スライスは量の多い順ではなく、Claude → Codex → Other のグループ順に
-    配置する（グループ内は利用量の降順）。
+    配置する（グループ内は value_key の降順）。
+    value_key は "total_tokens"（利用量）か "api_equivalent_cost_usd"（金額）。
     """
     ms = []
     for group in GROUPS:
-        ms.extend(models_of(window, group))
-    total = sum(m["total_tokens"] for m in ms) or 1
+        ms.extend(sorted(models_of(window, group), key=lambda m: -m[value_key]))
+    total = sum(m[value_key] for m in ms) or 1
     cx, cy, r = 100.0, 100.0, 88.0
     angle = -90.0
     paths = []
     labels = []
     for m in ms:
-        frac = m["total_tokens"] / total
+        frac = m[value_key] / total
         sweep = frac * 360.0
         a0 = math.radians(angle)
         a1 = math.radians(angle + sweep)
@@ -298,7 +302,8 @@ def build_html(body: dict, today: datetime) -> str:
         parts.append(f'<p>{"<br>".join(totals)}</p>')
         parts.extend(charts)
         parts.append("<h3>利用割合</h3>")
-        parts.append(pie_chart(w, color_of))
+        parts.append(f'<div data-pie="tokens">{pie_chart(w, color_of, "total_tokens")}</div>')
+        parts.append(f'<div data-pie="cost" hidden>{pie_chart(w, color_of, "api_equivalent_cost_usd")}</div>')
         panels.append(f'<div class="panel panel-{tab_id}">{"".join(parts)}</div>')
 
     return f"""<!DOCTYPE html>
