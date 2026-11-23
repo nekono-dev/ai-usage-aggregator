@@ -236,11 +236,13 @@ def pie_chart(window: dict, color_of: dict) -> str:
 
 def build_html(body: dict, today: datetime) -> str:
     color_of = assign_colors(body)
-    sections = []
-    for key, period_label in (("last_7d", "週次"), ("last_30d", "月次")):
+    panels = []
+    for key, period_label, tab_id in (("last_7d", "週次", "weekly"),
+                                      ("last_30d", "月次", "monthly")):
         w = body[key]
-        sections.append(f"<h2>{period_label}: {w['from']}〜{w['to']}</h2>")
+        parts = [f"<h2>{period_label}: {w['from']}〜{w['to']}</h2>"]
         totals = []
+        charts = []
         for group in GROUPS:
             ms = models_of(w, group)
             if not ms:
@@ -248,28 +250,41 @@ def build_html(body: dict, today: datetime) -> str:
             rows = [(display_name(m["model"]), m["total_tokens"],
                      f"${m['api_equivalent_cost_usd']:,.2f} / {fmt_m(m['total_tokens'])}")
                     for m in ms]
-            sections.append(f"<h3>{group}</h3>")
-            sections.append(bar_chart("利用量", rows, color_of))
+            charts.append(f"<h3>{group}</h3>")
+            charts.append(bar_chart("利用量", rows, color_of))
             g_cost = sum(m["api_equivalent_cost_usd"] for m in ms)
             g_tok = sum(m["total_tokens"] for m in ms)
             totals.append(f"{group} 合計: ${g_cost:,.2f} / {fmt_m(g_tok)}")
-        sections.append(f'<p style="font-weight:bold">{"<br>".join(totals)}</p>')
-
-    pies = []
-    for key, period_label in (("last_7d", "週次"), ("last_30d", "月次")):
-        pies.append(f'<div style="flex:1;min-width:340px"><h3>{period_label}</h3>'
-                    f'{pie_chart(body[key], color_of)}</div>')
-    sections.append("<h2>利用割合</h2>")
-    sections.append(f'<div style="display:flex;gap:20px;flex-wrap:wrap">{"".join(pies)}</div>')
+        # ベンダ別合計は期間見出しの直下に置く（特定ベンダの節に属さないため）
+        parts.append(f'<p>{"<br>".join(totals)}</p>')
+        parts.extend(charts)
+        parts.append("<h3>利用割合</h3>")
+        parts.append(pie_chart(w, color_of))
+        panels.append(f'<div class="panel panel-{tab_id}">{"".join(parts)}</div>')
 
     return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <title>AI利用量 {today.strftime('%Y-%m-%d')}</title>
-<style>body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:960px;margin:24px auto;padding:0 16px;color:#1a1a1a;line-height:1.6}}</style>
+<style>
+body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:960px;margin:24px auto;padding:0 16px;color:#1a1a1a;line-height:1.6}}
+.tabs > input{{display:none}}
+.tab-labels{{display:flex;gap:8px;margin:12px 0}}
+.tab-labels label{{padding:6px 18px;border:1px solid #ccc;border-radius:999px;cursor:pointer;font-size:14px}}
+.panel{{display:none}}
+#tab-weekly:checked ~ .panel-weekly{{display:block}}
+#tab-monthly:checked ~ .panel-monthly{{display:block}}
+#tab-weekly:checked ~ .tab-labels label[for='tab-weekly'],
+#tab-monthly:checked ~ .tab-labels label[for='tab-monthly']{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
+</style>
 </head><body>
 <h1>AI利用量</h1>
 <p>金額は API 換算の参考値。</p>
-{''.join(sections)}
+<div class="tabs">
+<input type="radio" name="period" id="tab-weekly" checked>
+<input type="radio" name="period" id="tab-monthly">
+<div class="tab-labels"><label for="tab-weekly">週次</label><label for="tab-monthly">月次</label></div>
+{''.join(panels)}
+</div>
 </body></html>"""
 
 
