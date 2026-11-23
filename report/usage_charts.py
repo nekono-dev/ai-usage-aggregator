@@ -233,6 +233,7 @@ def pie_chart(window: dict, color_of: dict) -> str:
     cx, cy, r = 100.0, 100.0, 88.0
     angle = -90.0
     paths = []
+    labels = []
     for m in ms:
         frac = m["total_tokens"] / total
         sweep = frac * 360.0
@@ -247,25 +248,29 @@ def pie_chart(window: dict, color_of: dict) -> str:
         else:
             paths.append(f'<path d="M {cx} {cy} L {x0:.1f} {y0:.1f} A {r} {r} 0 {large} 1 {x1:.1f} {y1:.1f} Z" '
                          f'fill="{color}" stroke="#fff" stroke-width="1.5"/>')
+        if frac >= 0.05:
+            am = math.radians(angle + sweep / 2)
+            lx, ly = cx + r * 0.62 * math.cos(am), cy + r * 0.62 * math.sin(am)
+            labels.append(f'<text x="{lx:.1f}" y="{ly:.1f}" font-size="12" font-weight="bold" '
+                          f'fill="#fff" text-anchor="middle" dominant-baseline="central">'
+                          f'{frac * 100:.0f}%</text>')
         angle += sweep
     svg = (f'<svg viewBox="0 0 200 200" role="img" aria-label="利用割合" '
-           f'style="width:200px;height:200px;flex:none">{"".join(paths)}</svg>')
+           f'style="width:min(200px,44vw);height:auto;flex:none">{"".join(paths)}{"".join(labels)}</svg>')
 
     legend = []
     for group in GROUPS:
         gms = [m for m in ms if group_of(m["model"]) == group]
         if not gms:
             continue
-        g_tok = sum(m["total_tokens"] for m in gms)
-        legend.append(f'<div style="font-weight:bold;margin-top:6px">{group} — {g_tok / total * 100:.1f}%</div>')
+        legend.append(f'<div style="font-weight:bold;margin-top:4px">{group}</div>')
         for m in gms:
             name = display_name(m["model"])
             legend.append(
-                f'<div><span style="display:inline-block;width:12px;height:12px;'
-                f'background:{color_of.get(name, "#666")};margin-right:6px"></span>'
-                f'{name} — {m["total_tokens"] / total * 100:.1f}%（{fmt_m(m["total_tokens"])}）</div>')
-    return (f'<div style="display:flex;gap:16px;align-items:flex-start">{svg}'
-            f'<div style="font-size:13px;flex:1;min-width:0">{"".join(legend)}</div></div>')
+                f'<div><span style="display:inline-block;width:10px;height:10px;'
+                f'background:{color_of.get(name, "#666")};margin-right:6px"></span>{name}</div>')
+    return (f'<div style="display:flex;gap:12px;align-items:flex-start">{svg}'
+            f'<div style="font-size:12px;line-height:1.35;flex:1;min-width:0">{"".join(legend)}</div></div>')
 
 
 def build_html(body: dict, today: datetime) -> str:
@@ -301,7 +306,11 @@ def build_html(body: dict, today: datetime) -> str:
 <html lang="ja"><head><meta charset="utf-8">
 <title>AI利用量 {today.strftime('%Y-%m-%d')}</title>
 <style>
-body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:960px;margin:24px auto;padding:0 16px;color:#1a1a1a;line-height:1.6}}
+body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:960px;margin:12px auto;padding:0 16px;color:#1a1a1a;line-height:1.5}}
+h1{{font-size:20px;margin:6px 0 2px}}
+h2{{font-size:16px;margin:14px 0 4px}}
+h3{{font-size:14px;margin:12px 0 4px}}
+p{{margin:4px 0 8px}}
 .tabs > input{{display:none}}
 .tab-labels{{display:flex;gap:8px;margin:12px 0}}
 .tab-labels label{{padding:6px 18px;border:1px solid #ccc;border-radius:999px;cursor:pointer;font-size:14px}}
@@ -319,6 +328,13 @@ body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:9
 .rname{{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .rbar i{{display:block;height:16px}}
 .rlabel{{white-space:nowrap}}
+@media (max-width:560px){{
+body{{padding:0 8px}}
+.row{{grid-template-columns:78px 1fr 116px;gap:6px;font-size:11px}}
+.rbar i{{height:14px}}
+.chart{{padding:8px}}
+.tab-labels label{{padding:5px 14px}}
+}}
 </style>
 </head><body>
 <h1>AI利用量</h1>
