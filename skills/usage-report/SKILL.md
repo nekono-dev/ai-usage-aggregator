@@ -17,8 +17,8 @@ description: ai-usage-aggregator の実測データから AI 利用量レポー�
 
 ## 前提
 
-- ai-usage-aggregator が稼働し、API キーで `/v1/summary` と
-  `/v1/report` を取得できること
+- ai-usage-aggregator が稼働し、API キーで `/v1/report` を
+  取得できること
 - Python 3.11 以上。依存は標準ライブラリのみ（追加インストール不要）
 
 ## 導入
@@ -30,8 +30,9 @@ description: ai-usage-aggregator の実測データから AI 利用量レポー�
 スクリプトが次の優先順で取得する。エージェントは自分の環境に合う
 ものを用意すればよい。
 
-1. 取得済み JSON を渡す: `--summary-json`（/v1/summary の応答）と
-   `--daily-json`（/v1/report?group_by=model の応答）
+1. 取得済み JSON を渡す: `--daily-json` / `--weekly-json` /
+   `--monthly-json`（いずれも /v1/report?group_by=model の応答。
+   期間はスクリプトが決める対象日に合わせること）
 2. 環境変数で直接取得: `AGGREGATOR_BASE_URL`（既定
    `http://localhost:8000`）と `AGGREGATOR_API_KEY`
 3. Muse のカスタムコネクタ（custom.ai-usage-aggregator）がある環境
@@ -43,7 +44,10 @@ description: ai-usage-aggregator の実測データから AI 利用量レポー�
 python3 report/usage_charts.py [--out DIR] [--date YYYY-MM-DD]
 ```
 
-- `--date`: 日次テーブルの対象日。省略時は JST の前日
+- `--date`: 日次テーブルの対象日の上書き。省略時は JST 12:00 前は
+  前日、12:00 以降は当日
+- 週次・月次は常に前日を末日とする（週次は7日間、月次は30日間）。
+  `--date` を指定しても起点は変わらない
 - `--out`: 出力先。省略時は `report/reports/`
 - テーブルは標準出力にも出る
 
