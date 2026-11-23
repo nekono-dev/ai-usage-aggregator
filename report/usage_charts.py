@@ -165,23 +165,28 @@ def assign_colors(body: dict) -> dict[str, str]:
     return color_of
 
 
-def bar_chart(title: str, rows: list[tuple[str, int, float, str]], color_of: dict) -> str:
-    """横棒グラフ（HTML）。rows = (表示名, トークン量, 金額, 値ラベル)。
+def bar_chart(title: str, rows: list[tuple[str, int, float, str, str]], color_of: dict) -> str:
+    """横棒グラフ（HTML）。rows = (表示名, トークン量, 金額, トークン量ラベル, 金額ラベル)。
 
     ページ上部の指標切替（利用量／金額）で JS が全グラフの行を並び替え、
-    棒の長さを選んだ指標の最大値に合わせて再計算する。初期表示は利用量の降順。
+    棒の長さを選んだ指標の最大値に合わせて再計算し、値ラベルも選んだ
+    指標のものに差し替える。初期表示は利用量の降順。
+    値ラベルは棒の内側（右端）に置く。棒が横幅の 50% 未満のときは
+    棒のすぐ右に置く。
     """
-    max_v = max((t for _, t, _, _ in rows), default=0) or 1
+    max_v = max((t for _, t, _, _, _ in rows), default=0) or 1
     parts = ['<div class="chart" data-chart>',
              f'<div class="chart-title">{title}</div><div class="rows">']
-    for name, tokens, cost, label in rows:
+    for name, tokens, cost, tok_label, cost_label in rows:
         w = tokens / max_v * 100
         color = color_of.get(name, "#666")
+        cls = "in" if w >= 50 else "out"
         parts.append(
-            f'<div class="row" data-tokens="{tokens}" data-cost="{cost}">'
+            f'<div class="row" data-tokens="{tokens}" data-cost="{cost}" '
+            f'data-tokens-label="{tok_label}" data-cost-label="{cost_label}">'
             f'<span class="rname">{name}</span>'
-            f'<span class="rbar"><i style="width:{w:.1f}%;background:{color}"></i></span>'
-            f'<span class="rlabel">{label}</span></div>')
+            f'<span class="rbar"><i style="width:{w:.1f}%;background:{color}"></i>'
+            f'<span class="rlabel {cls}" style="left:{w:.1f}%">{tok_label}</span></span></div>')
     parts.append("</div></div>")
     return "".join(parts)
 
@@ -199,6 +204,9 @@ document.querySelectorAll('[data-metric]').forEach(function (btn) {
     document.querySelectorAll('[data-pie]').forEach(function (p) {
       p.hidden = p.getAttribute('data-pie') !== key;
     });
+    document.querySelectorAll('[data-total]').forEach(function (s) {
+      s.hidden = s.getAttribute('data-total') !== key;
+    });
     document.querySelectorAll('[data-chart]').forEach(function (chart) {
       var rowsEl = chart.querySelector('.rows');
       var rows = Array.prototype.slice.call(rowsEl.children);
@@ -213,7 +221,12 @@ document.querySelectorAll('[data-metric]').forEach(function (btn) {
       });
       rows.forEach(function (r) {
         var v = parseFloat(r.getAttribute('data-' + key)) || 0;
-        r.querySelector('.rbar i').style.width = (v / max * 100) + '%';
+        var pct = v / max * 100;
+        r.querySelector('.rbar i').style.width = pct + '%';
+        var lbl = r.querySelector('.rlabel');
+        lbl.textContent = r.getAttribute('data-' + key + '-label');
+        lbl.style.left = pct + '%';
+        lbl.className = 'rlabel ' + (pct >= 50 ? 'in' : 'out');
         rowsEl.appendChild(r);
       });
     });
@@ -283,7 +296,8 @@ def build_html(body: dict, today: datetime) -> str:
                                       ("last_30d", "月次", "monthly")):
         w = body[key]
         parts = [f"<h2>{period_label}: {w['from']}〜{w['to']}</h2>"]
-        totals = []
+        totals_tok = []
+        totals_cost = []
         charts = []
         for group in GROUPS:
             ms = models_of(w, group)
@@ -291,15 +305,19 @@ def build_html(body: dict, today: datetime) -> str:
                 continue
             rows = [(display_name(m["model"]), m["total_tokens"],
                      m["api_equivalent_cost_usd"],
-                     f"${m['api_equivalent_cost_usd']:,.2f} / {fmt_m(m['total_tokens'])}")
+                     fmt_m(m["total_tokens"]),
+                     f"${m['api_equivalent_cost_usd']:,.2f}")
                     for m in ms]
             charts.append(f"<h3>{group}</h3>")
             charts.append(bar_chart("利用量", rows, color_of))
             g_cost = sum(m["api_equivalent_cost_usd"] for m in ms)
             g_tok = sum(m["total_tokens"] for m in ms)
-            totals.append(f"{group} 合計: ${g_cost:,.2f} / {fmt_m(g_tok)}")
-        # ベンダ別合計は期間見出しの直下に置く（特定ベンダの節に属さないため）
-        parts.append(f'<p>{"<br>".join(totals)}</p>')
+            totals_tok.append(f"{group} 合計: {fmt_m(g_tok)}")
+            totals_cost.append(f"{group} 合計: ${g_cost:,.2f}")
+        # ベンダ別合計は期間見出しの直下に置く（特定ベンダの節に属さないため）。
+        # 指標切替に連動し、選択中の指標の合計だけを見せる
+        parts.append(f'<p><span data-total="tokens">{"<br>".join(totals_tok)}</span>'
+                     f'<span data-total="cost" hidden>{"<br>".join(totals_cost)}</span></p>')
         parts.extend(charts)
         parts.append("<h3>利用割合</h3>")
         parts.append(f'<div data-pie="tokens">{pie_chart(w, color_of, "total_tokens")}</div>')
@@ -328,14 +346,19 @@ p{{margin:4px 0 8px}}
 #tab-monthly:checked ~ .controls label[for='tab-monthly']{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
 .chart{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;background:#fff}}
 .chart-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
-.row{{display:grid;grid-template-columns:104px 1fr 148px;align-items:center;gap:8px;margin:5px 0;font-size:12px}}
+.row{{display:grid;grid-template-columns:104px 1fr;align-items:center;gap:8px;margin:5px 0;font-size:12px}}
 .rname{{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.rbar i{{display:block;height:16px}}
-.rlabel{{white-space:nowrap}}
+.rbar{{position:relative;height:16px;display:block}}
+.rbar i{{position:absolute;left:0;top:0;height:16px}}
+.rlabel{{position:absolute;top:0;height:16px;display:flex;align-items:center;white-space:nowrap}}
+.rlabel.in{{color:#fff;transform:translateX(-100%);padding-right:6px}}
+.rlabel.out{{color:#1a1a1a;padding-left:6px}}
 @media (max-width:560px){{
 body{{padding:0 8px}}
-.row{{grid-template-columns:78px 1fr 116px;gap:6px;font-size:11px}}
+.row{{grid-template-columns:78px 1fr;gap:6px;font-size:11px}}
+.rbar{{height:14px}}
 .rbar i{{height:14px}}
+.rlabel{{height:14px;font-size:11px}}
 .chart{{padding:8px}}
 .tab-labels label{{padding:5px 14px}}
 }}
