@@ -54,34 +54,31 @@ services:
   # セルフアップデートの実行役。docker.sock を持つのはこのコンテナだけ。
   # ネットワークの受付はせず、アプリが control ボリュームに書いた
   # 更新リクエスト（固定手順のみ）を実行する。
+  # ソースはホストのチェックアウトではなく、専用ボリューム source 内の
+  # 自前クローン（/src/repo）を使う。ホスト側の git 状態に干渉されない。
   updater:
     restart: always
     build:
       context: ./updater
     environment:
       CONTROL_DIR: /control
-      PROJECT_DIR: /project
+      PROJECT_DIR: /src/repo
       APP_HEALTH_URL: http://app:8000/healthz
       # 動作確認用。1 のときは git / docker を実行せず成功扱いで状態だけ進める
       UPDATER_DRY_RUN: "${UPDATER_DRY_RUN:-}"
-      # git の SSH 接続をホストの実行ユーザーと同じ設定で行うための指定。
-      # ~/.ssh はそのままのパスでマウントし、updater が起動時に所有者を
-      # 揃えたコピーを作ってそちらを使う（OpenSSH は所有者の違う config と
-      # 鍵を無視するため）。SOURCE_HOME はコピー元の特定用
-      HOME: "${HOME}"
-      SOURCE_HOME: "${HOME}"
-      GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts"
+      # 自前クローンの取得元（公開リポジトリ。未指定なら公式 URL）
+      GIT_REPO_URL: "${GIT_REPO_URL:-}"
     volumes:
       - control:/control
-      # デプロイ用チェックアウトそのものをマウントする（git pull の対象）
-      - .:/project
+      - source:/src
+      # compose の interpolation と app の env_file 用に、ホストの .env を
+      # クローン直下へそのまま見せる
+      - ./.env:/src/repo/.env:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      # SSH リモートから fetch するため、実行ユーザーの ~/.ssh を
-      # 読み取り専用・同一パスでマウントする（config と鍵）
-      - ${HOME}/.ssh:${HOME}/.ssh:ro
     depends_on:
       - app
 
 volumes:
   usage-data:
   control:
+  source:
