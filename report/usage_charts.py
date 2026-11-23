@@ -165,25 +165,59 @@ def assign_colors(body: dict) -> dict[str, str]:
     return color_of
 
 
-def bar_chart(title: str, rows: list[tuple[str, float, str]], color_of: dict) -> str:
-    """横棒グラフ（SVG）。rows = (表示名, 棒の値, 値ラベル)。"""
-    label_w, bar_area, value_w = 108, 168, 164
-    width = label_w + bar_area + value_w
-    row_h = 26
-    height = 30 + row_h * max(1, len(rows))
-    max_v = max((v for _, v, _ in rows), default=0) or 1
-    parts = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{title}" '
-             f'style="width:100%;height:auto;background:#fff;border:1px solid #ddd;border-radius:8px">',
-             f'<text x="8" y="20" font-size="13" font-weight="bold" fill="#1a1a1a">{title}</text>']
-    for i, (name, v, label) in enumerate(rows):
-        y = 30 + i * row_h
-        w = v / max_v * bar_area
+def bar_chart(title: str, rows: list[tuple[str, int, float, str]], color_of: dict) -> str:
+    """横棒グラフ（HTML）。rows = (表示名, トークン量, 金額, 値ラベル)。
+
+    並び替えボタン（利用量順／金額順）で JS が行を並び替え、棒の長さを
+    選んだ指標の最大値に合わせて再計算する。初期表示は利用量の降順。
+    """
+    max_v = max((t for _, t, _, _ in rows), default=0) or 1
+    parts = ['<div class="chart" data-chart>',
+             f'<div class="chart-head"><span class="chart-title">{title}</span>'
+             '<span class="sort-btns">'
+             '<button type="button" data-sort="tokens" class="active">利用量順</button>'
+             '<button type="button" data-sort="cost">金額順</button>'
+             '</span></div><div class="rows">']
+    for name, tokens, cost, label in rows:
+        w = tokens / max_v * 100
         color = color_of.get(name, "#666")
-        parts.append(f'<text x="{label_w - 6}" y="{y + 16}" font-size="12" text-anchor="end" fill="#1a1a1a">{name}</text>')
-        parts.append(f'<rect x="{label_w}" y="{y + 3}" width="{w:.1f}" height="16" fill="{color}"/>')
-        parts.append(f'<text x="{label_w + w + 6:.1f}" y="{y + 16}" font-size="12" fill="#1a1a1a">{label}</text>')
-    parts.append("</svg>")
+        parts.append(
+            f'<div class="row" data-tokens="{tokens}" data-cost="{cost}">'
+            f'<span class="rname">{name}</span>'
+            f'<span class="rbar"><i style="width:{w:.1f}%;background:{color}"></i></span>'
+            f'<span class="rlabel">{label}</span></div>')
+    parts.append("</div></div>")
     return "".join(parts)
+
+
+SORT_SCRIPT = """<script>
+document.querySelectorAll('[data-chart]').forEach(function (chart) {
+  var rowsEl = chart.querySelector('.rows');
+  chart.querySelectorAll('[data-sort]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var key = btn.getAttribute('data-sort');
+      chart.querySelectorAll('[data-sort]').forEach(function (b) {
+        b.classList.toggle('active', b === btn);
+      });
+      var rows = Array.prototype.slice.call(rowsEl.children);
+      var max = 0;
+      rows.forEach(function (r) {
+        max = Math.max(max, parseFloat(r.getAttribute('data-' + key)) || 0);
+      });
+      if (!max) max = 1;
+      rows.sort(function (a, b) {
+        return (parseFloat(b.getAttribute('data-' + key)) || 0)
+             - (parseFloat(a.getAttribute('data-' + key)) || 0);
+      });
+      rows.forEach(function (r) {
+        var v = parseFloat(r.getAttribute('data-' + key)) || 0;
+        r.querySelector('.rbar i').style.width = (v / max * 100) + '%';
+        rowsEl.appendChild(r);
+      });
+    });
+  });
+});
+</script>"""
 
 
 def pie_chart(window: dict, color_of: dict) -> str:
@@ -230,8 +264,8 @@ def pie_chart(window: dict, color_of: dict) -> str:
                 f'<div><span style="display:inline-block;width:12px;height:12px;'
                 f'background:{color_of.get(name, "#666")};margin-right:6px"></span>'
                 f'{name} — {m["total_tokens"] / total * 100:.1f}%（{fmt_m(m["total_tokens"])}）</div>')
-    return (f'<div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">{svg}'
-            f'<div style="font-size:13px">{"".join(legend)}</div></div>')
+    return (f'<div style="display:flex;gap:16px;align-items:flex-start">{svg}'
+            f'<div style="font-size:13px;flex:1;min-width:0">{"".join(legend)}</div></div>')
 
 
 def build_html(body: dict, today: datetime) -> str:
@@ -248,6 +282,7 @@ def build_html(body: dict, today: datetime) -> str:
             if not ms:
                 continue
             rows = [(display_name(m["model"]), m["total_tokens"],
+                     m["api_equivalent_cost_usd"],
                      f"${m['api_equivalent_cost_usd']:,.2f} / {fmt_m(m['total_tokens'])}")
                     for m in ms]
             charts.append(f"<h3>{group}</h3>")
@@ -275,6 +310,15 @@ body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:9
 #tab-monthly:checked ~ .panel-monthly{{display:block}}
 #tab-weekly:checked ~ .tab-labels label[for='tab-weekly'],
 #tab-monthly:checked ~ .tab-labels label[for='tab-monthly']{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
+.chart{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;background:#fff}}
+.chart-head{{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}}
+.chart-title{{font-weight:bold;font-size:13px}}
+.sort-btns button{{padding:2px 10px;margin-left:6px;border:1px solid #ccc;border-radius:999px;background:#fff;cursor:pointer;font-size:12px;color:#1a1a1a}}
+.sort-btns button.active{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
+.row{{display:grid;grid-template-columns:104px 1fr 148px;align-items:center;gap:8px;margin:5px 0;font-size:12px}}
+.rname{{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.rbar i{{display:block;height:16px}}
+.rlabel{{white-space:nowrap}}
 </style>
 </head><body>
 <h1>AI利用量</h1>
@@ -285,6 +329,7 @@ body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:9
 <div class="tab-labels"><label for="tab-weekly">週次</label><label for="tab-monthly">月次</label></div>
 {''.join(panels)}
 </div>
+{SORT_SCRIPT}
 </body></html>"""
 
 
