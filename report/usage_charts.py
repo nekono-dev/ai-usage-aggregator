@@ -328,7 +328,8 @@ def build_html(body: dict, today: datetime) -> str:
 <html lang="ja"><head><meta charset="utf-8">
 <title>AI利用量 {today.strftime('%Y-%m-%d')}</title>
 <style>
-body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:960px;margin:12px auto;padding:0 16px;color:#1a1a1a;line-height:1.5}}
+:root{{color-scheme:light dark}}
+body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:960px;margin:12px auto;padding:0 16px;color:#1a1a1a;background:#fff;line-height:1.5}}
 h1{{font-size:20px;margin:6px 0 2px}}
 h2{{font-size:16px;margin:14px 0 4px}}
 h3{{font-size:14px;margin:12px 0 4px}}
@@ -361,6 +362,19 @@ body{{padding:0 8px}}
 .rlabel{{height:14px;font-size:11px}}
 .chart{{padding:8px}}
 .tab-labels label{{padding:5px 14px}}
+}}
+@media (prefers-color-scheme:dark){{
+body{{background:#121212;color:#e8e8e8}}
+h2{{border-bottom-color:#444}}
+.totals{{color:#bbb}}
+.tab{{border-color:#555}}
+input.tog:checked+label.tab{{background:#e8e8e8;color:#121212;border-color:#e8e8e8}}
+.msel{{border-color:#555}}
+.msel.on{{background:#e8e8e8;color:#121212;border-color:#e8e8e8}}
+.chart{{background:#1e1e1e;border-color:#333}}
+.ct{{color:#ccc}}
+.track{{background:#333}}
+.rlabel.out{{color:#e8e8e8}}
 }}
 </style>
 </head><body>
