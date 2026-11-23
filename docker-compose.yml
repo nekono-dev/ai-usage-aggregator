@@ -1,5 +1,6 @@
 services:
   app:
+    restart: always
     build:
       context: .
       args:
@@ -37,6 +38,7 @@ services:
     # ports は公開しない。外部公開は cloudflared 経由のみ。
 
   cloudflared:
+    restart: always
     image: cloudflare/cloudflared:latest
     command: tunnel --no-autoupdate run
     environment:
@@ -53,6 +55,7 @@ services:
   # ネットワークの受付はせず、アプリが control ボリュームに書いた
   # 更新リクエスト（固定手順のみ）を実行する。
   updater:
+    restart: always
     build:
       context: ./updater
     environment:
