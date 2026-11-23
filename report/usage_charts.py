@@ -285,8 +285,8 @@ def pie_chart(window: dict, color_of: dict, value_key: str = "total_tokens") -> 
             legend.append(
                 f'<div><span style="display:inline-block;width:10px;height:10px;'
                 f'background:{color_of.get(name, "#666")};margin-right:6px"></span>{name}</div>')
-    return (f'<div style="display:flex;gap:12px;align-items:flex-start">{svg}'
-            f'<div style="font-size:12px;line-height:1.35;flex:1;min-width:0">{"".join(legend)}</div></div>')
+    return (f'<div style="display:flex;gap:16px;align-items:flex-start;justify-content:center">{svg}'
+            f'<div style="font-size:12px;line-height:1.35;min-width:0">{"".join(legend)}</div></div>')
 
 
 def build_html(body: dict, today: datetime) -> str:
@@ -315,13 +315,17 @@ def build_html(body: dict, today: datetime) -> str:
             totals_tok.append(f"{group} 合計: {fmt_m(g_tok)}")
             totals_cost.append(f"{group} 合計: ${g_cost:,.2f}")
         # ベンダ別合計は期間見出しの直下に置く（特定ベンダの節に属さないため）。
+        # 他のグラフと同じ box セグメントに収め、箇条書きで示す。
         # 指標切替に連動し、選択中の指標の合計だけを見せる
-        parts.append(f'<p><span data-total="tokens">{"<br>".join(totals_tok)}</span>'
-                     f'<span data-total="cost" hidden>{"<br>".join(totals_cost)}</span></p>')
+        tok_items = "".join(f"<li>{t}</li>" for t in totals_tok)
+        cost_items = "".join(f"<li>{t}</li>" for t in totals_cost)
+        parts.append(f'<div class="chart seg"><ul class="totals-list" data-total="tokens">{tok_items}</ul>'
+                     f'<ul class="totals-list" data-total="cost" hidden>{cost_items}</ul></div>')
         parts.extend(charts)
-        parts.append("<h3>利用割合</h3>")
-        parts.append(f'<div data-pie="tokens">{pie_chart(w, color_of, "total_tokens")}</div>')
-        parts.append(f'<div data-pie="cost" hidden>{pie_chart(w, color_of, "api_equivalent_cost_usd")}</div>')
+        parts.append(f'<div class="chart seg" data-pie="tokens"><div class="pie-title">利用割合（利用量）</div>'
+                     f'{pie_chart(w, color_of, "total_tokens")}</div>')
+        parts.append(f'<div class="chart seg" data-pie="cost" hidden><div class="pie-title">利用割合（金額）</div>'
+                     f'{pie_chart(w, color_of, "api_equivalent_cost_usd")}</div>')
         panels.append(f'<div class="panel panel-{tab_id}">{"".join(parts)}</div>')
 
     return f"""<!DOCTYPE html>
@@ -336,9 +340,9 @@ h3{{font-size:14px;margin:12px 0 4px}}
 p{{margin:4px 0 8px}}
 .tabs > input{{display:none}}
 .tab-labels{{display:flex;gap:8px}}
-.tab-labels label{{padding:6px 18px;border:1px solid #ccc;border-radius:999px;cursor:pointer;font-size:14px}}
+.tab-labels label{{padding:6px 16px;border:1px solid #ccc;border-radius:999px;cursor:pointer;font-size:13px}}
 .controls{{display:flex;justify-content:space-between;align-items:center;margin:12px 0}}
-.metric-btns button{{padding:6px 14px;margin-left:6px;border:1px solid #ccc;border-radius:999px;background:#fff;cursor:pointer;font-size:13px;color:#1a1a1a}}
+.metric-btns button{{padding:6px 16px;margin-left:6px;border:1px solid #ccc;border-radius:999px;background:#fff;cursor:pointer;font-size:13px;color:#1a1a1a}}
 .metric-btns button.active{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
 .panel{{display:none}}
 #tab-weekly:checked ~ .panel-weekly{{display:block}}
@@ -346,6 +350,10 @@ p{{margin:4px 0 8px}}
 #tab-weekly:checked ~ .controls label[for='tab-weekly'],
 #tab-monthly:checked ~ .controls label[for='tab-monthly']{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
 .chart{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;background:#fff}}
+.seg{{margin:8px 0}}
+.totals-list{{margin:0;padding-left:1.3em}}
+.totals-list li{{margin:2px 0}}
+.pie-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
 .chart-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
 .row{{display:grid;grid-template-columns:104px 1fr;align-items:center;gap:8px;margin:5px 0;font-size:12px}}
 .rname{{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
@@ -361,19 +369,17 @@ body{{padding:0 8px}}
 .rbar i{{height:14px}}
 .rlabel{{height:14px;font-size:11px}}
 .chart{{padding:8px}}
-.tab-labels label{{padding:5px 14px}}
+.tab-labels label{{padding:5px 12px}}
+.metric-btns button{{padding:5px 12px}}
 }}
 @media (prefers-color-scheme:dark){{
 body{{background:#121212;color:#e8e8e8}}
-h2{{border-bottom-color:#444}}
-.totals{{color:#bbb}}
-.tab{{border-color:#555}}
-input.tog:checked+label.tab{{background:#e8e8e8;color:#121212;border-color:#e8e8e8}}
-.msel{{border-color:#555}}
-.msel.on{{background:#e8e8e8;color:#121212;border-color:#e8e8e8}}
 .chart{{background:#1e1e1e;border-color:#333}}
-.ct{{color:#ccc}}
-.track{{background:#333}}
+.tab-labels label{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
+#tab-weekly:checked ~ .controls label[for='tab-weekly'],
+#tab-monthly:checked ~ .controls label[for='tab-monthly']{{background:#fff;color:#000;border-color:#fff}}
+.metric-btns button{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
+.metric-btns button.active{{background:#fff;color:#000;border-color:#fff}}
 .rlabel.out{{color:#e8e8e8}}
 }}
 </style>
