@@ -4,17 +4,22 @@
 出力:
 - usage_tables.md: 日次テーブル（Markdown、ベンダ別、モデル行は実測に
   現れたものだけ）
-- usage.html: 週次・月次の棒グラフ（棒は利用量、ラベルは「$金額 /
-  トークン量」）、期間ごとのベンダ別合計、利用割合の円グラフ
+- usage.html: 週次・月次の棒グラフと利用割合の円グラフ、期間ごとの
+  ベンダ別合計
+
+対象日（JST）:
+- 日次: 12:00 前は前日、12:00 以降は当日
+- 週次・月次: 常に前日を末日とする（週次は7日間、月次は30日間）
 
 データ取得（優先順）:
-1. --summary-json / --daily-json で取得済み JSON を渡す
+1. --daily-json / --weekly-json / --monthly-json で取得済み JSON を渡す
+   （いずれも /v1/report?group_by=model の応答）
 2. 環境変数 AGGREGATOR_API_KEY と AGGREGATOR_BASE_URL
    （既定 http://localhost:8000）で API から直接取得する
 3. Muse カスタムコネクタのヘルパーがあればそれを使う
 
 使い方: python3 usage_charts.py [--out DIR] [--date YYYY-MM-DD]
---date は日次テーブルの対象日（既定は JST の前日）。
+--date は日次テーブルの対象日の上書き（週次・月次の起点は変わらない）。
 """
 from __future__ import annotations
 
@@ -64,20 +69,47 @@ def _helper(*args: str) -> dict:
     return json.loads(out.stdout)["body"]
 
 
-def fetch_all(daily_date: str) -> tuple[dict, dict]:
-    """(summary, daily report) を取得する。"""
+def report_dates(now: datetime) -> dict:
+    """対象日を決める（JST）。
+
+    日次は 12:00 前は前日、12:00 以降は当日。週次・月次は常に前日を
+    末日とする（週次は7日間、月次は30日間）。
+    """
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    return {
+        "daily": today if now.hour >= 12 else yesterday,
+        "week": (yesterday - timedelta(days=6), yesterday),
+        "month": (yesterday - timedelta(days=29), yesterday),
+    }
+
+
+def _fetch_report(frm: str, to: str) -> dict:
     if os.environ.get("AGGREGATOR_API_KEY"):
-        summary = _http_get("/v1/summary")
-        daily = _http_get(f"/v1/report?group_by=model&from={daily_date}&to={daily_date}")
-        return summary, daily
+        return _http_get(f"/v1/report?group_by=model&from={frm}&to={to}")
     if HELPER.exists():
-        summary = _helper("summary")
-        daily = _helper("report", "--group-by", "model",
-                        "--from", daily_date, "--to", daily_date)
-        return summary, daily
+        return _helper("report", "--group-by", "model", "--from", frm, "--to", to)
     raise SystemExit(
-        "データ取得手段がありません: --summary-json/--daily-json を渡すか、"
+        "データ取得手段がありません: --daily-json 等を渡すか、"
         "AGGREGATOR_API_KEY を設定してください")
+
+
+def _window(report: dict, frm: str, to: str) -> dict:
+    """report 応答を summary の期間と同じ形（from/to/by_model）に直す。"""
+    return {"from": frm, "to": to, "by_model": [
+        {"model": g["group"], "total_tokens": g["total_tokens"],
+         "api_equivalent_cost_usd": g["api_equivalent_cost_usd"],
+         "records": g.get("records", 0)}
+        for g in report.get("groups", [])]}
+
+
+def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
+    """(windows, daily report) を取得する。windows は last_7d/last_30d。"""
+    wf, wt = week[0].isoformat(), week[1].isoformat()
+    mf, mt = month[0].isoformat(), month[1].isoformat()
+    body = {"last_7d": _window(_fetch_report(wf, wt), wf, wt),
+            "last_30d": _window(_fetch_report(mf, mt), mf, mt)}
+    return body, _fetch_report(daily_date, daily_date)
 
 
 # ---------- 整形 ----------
@@ -285,8 +317,8 @@ def pie_chart(window: dict, color_of: dict, value_key: str = "total_tokens") -> 
             legend.append(
                 f'<div><span style="display:inline-block;width:10px;height:10px;'
                 f'background:{color_of.get(name, "#666")};margin-right:6px"></span>{name}</div>')
-    return (f'<div style="display:flex;gap:12px;align-items:flex-start">{svg}'
-            f'<div style="font-size:12px;line-height:1.35;flex:1;min-width:0">{"".join(legend)}</div></div>')
+    return (f'<div style="display:flex;gap:16px;align-items:flex-start;justify-content:center">{svg}'
+            f'<div style="font-size:12px;line-height:1.35;min-width:0">{"".join(legend)}</div></div>')
 
 
 def build_html(body: dict, today: datetime) -> str:
@@ -315,13 +347,17 @@ def build_html(body: dict, today: datetime) -> str:
             totals_tok.append(f"{group} 合計: {fmt_m(g_tok)}")
             totals_cost.append(f"{group} 合計: ${g_cost:,.2f}")
         # ベンダ別合計は期間見出しの直下に置く（特定ベンダの節に属さないため）。
+        # 他のグラフと同じ box セグメントに収め、箇条書きで示す。
         # 指標切替に連動し、選択中の指標の合計だけを見せる
-        parts.append(f'<p><span data-total="tokens">{"<br>".join(totals_tok)}</span>'
-                     f'<span data-total="cost" hidden>{"<br>".join(totals_cost)}</span></p>')
+        tok_items = "".join(f"<li>{t}</li>" for t in totals_tok)
+        cost_items = "".join(f"<li>{t}</li>" for t in totals_cost)
+        parts.append(f'<div class="chart seg"><ul class="totals-list" data-total="tokens">{tok_items}</ul>'
+                     f'<ul class="totals-list" data-total="cost" hidden>{cost_items}</ul></div>')
         parts.extend(charts)
-        parts.append("<h3>利用割合</h3>")
-        parts.append(f'<div data-pie="tokens">{pie_chart(w, color_of, "total_tokens")}</div>')
-        parts.append(f'<div data-pie="cost" hidden>{pie_chart(w, color_of, "api_equivalent_cost_usd")}</div>')
+        parts.append(f'<div class="chart seg" data-pie="tokens"><div class="pie-title">利用割合（利用量）</div>'
+                     f'{pie_chart(w, color_of, "total_tokens")}</div>')
+        parts.append(f'<div class="chart seg" data-pie="cost" hidden><div class="pie-title">利用割合（金額）</div>'
+                     f'{pie_chart(w, color_of, "api_equivalent_cost_usd")}</div>')
         panels.append(f'<div class="panel panel-{tab_id}">{"".join(parts)}</div>')
 
     return f"""<!DOCTYPE html>
@@ -336,9 +372,9 @@ h3{{font-size:14px;margin:12px 0 4px}}
 p{{margin:4px 0 8px}}
 .tabs > input{{display:none}}
 .tab-labels{{display:flex;gap:8px}}
-.tab-labels label{{padding:6px 18px;border:1px solid #ccc;border-radius:999px;cursor:pointer;font-size:14px}}
+.tab-labels label{{padding:6px 16px;border:1px solid #ccc;border-radius:999px;cursor:pointer;font-size:13px}}
 .controls{{display:flex;justify-content:space-between;align-items:center;margin:12px 0}}
-.metric-btns button{{padding:6px 14px;margin-left:6px;border:1px solid #ccc;border-radius:999px;background:#fff;cursor:pointer;font-size:13px;color:#1a1a1a}}
+.metric-btns button{{padding:6px 16px;margin-left:6px;border:1px solid #ccc;border-radius:999px;background:#fff;cursor:pointer;font-size:13px;color:#1a1a1a}}
 .metric-btns button.active{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
 .panel{{display:none}}
 #tab-weekly:checked ~ .panel-weekly{{display:block}}
@@ -346,6 +382,10 @@ p{{margin:4px 0 8px}}
 #tab-weekly:checked ~ .controls label[for='tab-weekly'],
 #tab-monthly:checked ~ .controls label[for='tab-monthly']{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
 .chart{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;background:#fff}}
+.seg{{margin:8px 0}}
+.totals-list{{margin:0;padding-left:1.3em}}
+.totals-list li{{margin:2px 0}}
+.pie-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
 .chart-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
 .row{{display:grid;grid-template-columns:104px 1fr;align-items:center;gap:8px;margin:5px 0;font-size:12px}}
 .rname{{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
@@ -361,19 +401,17 @@ body{{padding:0 8px}}
 .rbar i{{height:14px}}
 .rlabel{{height:14px;font-size:11px}}
 .chart{{padding:8px}}
-.tab-labels label{{padding:5px 14px}}
+.tab-labels label{{padding:5px 12px}}
+.metric-btns button{{padding:5px 12px}}
 }}
 @media (prefers-color-scheme:dark){{
 body{{background:#121212;color:#e8e8e8}}
-h2{{border-bottom-color:#444}}
-.totals{{color:#bbb}}
-.tab{{border-color:#555}}
-input.tog:checked+label.tab{{background:#e8e8e8;color:#121212;border-color:#e8e8e8}}
-.msel{{border-color:#555}}
-.msel.on{{background:#e8e8e8;color:#121212;border-color:#e8e8e8}}
 .chart{{background:#1e1e1e;border-color:#333}}
-.ct{{color:#ccc}}
-.track{{background:#333}}
+.tab-labels label{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
+#tab-weekly:checked ~ .controls label[for='tab-weekly'],
+#tab-monthly:checked ~ .controls label[for='tab-monthly']{{background:#fff;color:#000;border-color:#fff}}
+.metric-btns button{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
+.metric-btns button.active{{background:#fff;color:#000;border-color:#fff}}
 .rlabel.out{{color:#e8e8e8}}
 }}
 </style>
@@ -398,31 +436,37 @@ def main() -> int:
     parser.add_argument("--out", default=str(BASE / "reports"),
                         help="出力先ディレクトリ")
     parser.add_argument("--date", default=None,
-                        help="日次テーブルの対象日 YYYY-MM-DD（既定は JST の前日）")
-    parser.add_argument("--summary-json", default=None,
-                        help="/v1/summary の応答 JSON ファイル")
+                        help="日次テーブルの対象日 YYYY-MM-DD（既定は JST 12:00 前は前日、以降は当日）")
     parser.add_argument("--daily-json", default=None,
-                        help="/v1/report（group_by=model）の応答 JSON ファイル")
+                        help="日次の /v1/report（group_by=model）応答 JSON ファイル")
+    parser.add_argument("--weekly-json", default=None,
+                        help="週次の /v1/report（group_by=model）応答 JSON ファイル")
+    parser.add_argument("--monthly-json", default=None,
+                        help="月次の /v1/report（group_by=model）応答 JSON ファイル")
     args = parser.parse_args()
 
     now = datetime.now(JST)
-    daily_date = args.date or (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    dates = report_dates(now)
+    daily_date = args.date or dates["daily"].isoformat()
+    wf, wt = dates["week"][0].isoformat(), dates["week"][1].isoformat()
+    mf, mt = dates["month"][0].isoformat(), dates["month"][1].isoformat()
 
-    summary = daily = None
-    if args.summary_json:
-        summary = json.loads(Path(args.summary_json).read_text())
+    body = daily = None
+    if args.weekly_json and args.monthly_json:
+        body = {"last_7d": _window(json.loads(Path(args.weekly_json).read_text()), wf, wt),
+                "last_30d": _window(json.loads(Path(args.monthly_json).read_text()), mf, mt)}
     if args.daily_json:
         daily = json.loads(Path(args.daily_json).read_text())
-    if summary is None or daily is None:
-        fetched_summary, fetched_daily = fetch_all(daily_date)
-        summary = summary if summary is not None else fetched_summary
+    if body is None or daily is None:
+        fetched_body, fetched_daily = fetch_all(daily_date, dates["week"], dates["month"])
+        body = body if body is not None else fetched_body
         daily = daily if daily is not None else fetched_daily
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     tables = build_tables(daily, daily_date)
     (out_dir / "usage_tables.md").write_text(tables + "\n")
-    (out_dir / "usage.html").write_text(build_html(summary, now))
+    (out_dir / "usage.html").write_text(build_html(body, now))
     print(tables)
     return 0
 
