@@ -4,17 +4,22 @@
 出力:
 - usage_tables.md: 日次テーブル（Markdown、ベンダ別、モデル行は実測に
   現れたものだけ）
-- usage.html: 週次・月次の棒グラフ（棒は利用量、ラベルは「$金額 /
-  トークン量」）、期間ごとのベンダ別合計、利用割合の円グラフ
+- usage.html: 週次・月次の棒グラフと利用割合の円グラフ、期間ごとの
+  ベンダ別合計
+
+対象日（JST）:
+- 日次: 12:00 前は前日、12:00 以降は当日
+- 週次・月次: 常に前日を末日とする（週次は7日間、月次は30日間）
 
 データ取得（優先順）:
-1. --summary-json / --daily-json で取得済み JSON を渡す
+1. --daily-json / --weekly-json / --monthly-json で取得済み JSON を渡す
+   （いずれも /v1/report?group_by=model の応答）
 2. 環境変数 AGGREGATOR_API_KEY と AGGREGATOR_BASE_URL
    （既定 http://localhost:8000）で API から直接取得する
 3. Muse カスタムコネクタのヘルパーがあればそれを使う
 
 使い方: python3 usage_charts.py [--out DIR] [--date YYYY-MM-DD]
---date は日次テーブルの対象日（既定は JST の前日）。
+--date は日次テーブルの対象日の上書き（週次・月次の起点は変わらない）。
 """
 from __future__ import annotations
 
@@ -64,20 +69,47 @@ def _helper(*args: str) -> dict:
     return json.loads(out.stdout)["body"]
 
 
-def fetch_all(daily_date: str) -> tuple[dict, dict]:
-    """(summary, daily report) を取得する。"""
+def report_dates(now: datetime) -> dict:
+    """対象日を決める（JST）。
+
+    日次は 12:00 前は前日、12:00 以降は当日。週次・月次は常に前日を
+    末日とする（週次は7日間、月次は30日間）。
+    """
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    return {
+        "daily": today if now.hour >= 12 else yesterday,
+        "week": (yesterday - timedelta(days=6), yesterday),
+        "month": (yesterday - timedelta(days=29), yesterday),
+    }
+
+
+def _fetch_report(frm: str, to: str) -> dict:
     if os.environ.get("AGGREGATOR_API_KEY"):
-        summary = _http_get("/v1/summary")
-        daily = _http_get(f"/v1/report?group_by=model&from={daily_date}&to={daily_date}")
-        return summary, daily
+        return _http_get(f"/v1/report?group_by=model&from={frm}&to={to}")
     if HELPER.exists():
-        summary = _helper("summary")
-        daily = _helper("report", "--group-by", "model",
-                        "--from", daily_date, "--to", daily_date)
-        return summary, daily
+        return _helper("report", "--group-by", "model", "--from", frm, "--to", to)
     raise SystemExit(
-        "データ取得手段がありません: --summary-json/--daily-json を渡すか、"
+        "データ取得手段がありません: --daily-json 等を渡すか、"
         "AGGREGATOR_API_KEY を設定してください")
+
+
+def _window(report: dict, frm: str, to: str) -> dict:
+    """report 応答を summary の期間と同じ形（from/to/by_model）に直す。"""
+    return {"from": frm, "to": to, "by_model": [
+        {"model": g["group"], "total_tokens": g["total_tokens"],
+         "api_equivalent_cost_usd": g["api_equivalent_cost_usd"],
+         "records": g.get("records", 0)}
+        for g in report.get("groups", [])]}
+
+
+def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
+    """(windows, daily report) を取得する。windows は last_7d/last_30d。"""
+    wf, wt = week[0].isoformat(), week[1].isoformat()
+    mf, mt = month[0].isoformat(), month[1].isoformat()
+    body = {"last_7d": _window(_fetch_report(wf, wt), wf, wt),
+            "last_30d": _window(_fetch_report(mf, mt), mf, mt)}
+    return body, _fetch_report(daily_date, daily_date)
 
 
 # ---------- 整形 ----------
@@ -404,31 +436,37 @@ def main() -> int:
     parser.add_argument("--out", default=str(BASE / "reports"),
                         help="出力先ディレクトリ")
     parser.add_argument("--date", default=None,
-                        help="日次テーブルの対象日 YYYY-MM-DD（既定は JST の前日）")
-    parser.add_argument("--summary-json", default=None,
-                        help="/v1/summary の応答 JSON ファイル")
+                        help="日次テーブルの対象日 YYYY-MM-DD（既定は JST 12:00 前は前日、以降は当日）")
     parser.add_argument("--daily-json", default=None,
-                        help="/v1/report（group_by=model）の応答 JSON ファイル")
+                        help="日次の /v1/report（group_by=model）応答 JSON ファイル")
+    parser.add_argument("--weekly-json", default=None,
+                        help="週次の /v1/report（group_by=model）応答 JSON ファイル")
+    parser.add_argument("--monthly-json", default=None,
+                        help="月次の /v1/report（group_by=model）応答 JSON ファイル")
     args = parser.parse_args()
 
     now = datetime.now(JST)
-    daily_date = args.date or (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    dates = report_dates(now)
+    daily_date = args.date or dates["daily"].isoformat()
+    wf, wt = dates["week"][0].isoformat(), dates["week"][1].isoformat()
+    mf, mt = dates["month"][0].isoformat(), dates["month"][1].isoformat()
 
-    summary = daily = None
-    if args.summary_json:
-        summary = json.loads(Path(args.summary_json).read_text())
+    body = daily = None
+    if args.weekly_json and args.monthly_json:
+        body = {"last_7d": _window(json.loads(Path(args.weekly_json).read_text()), wf, wt),
+                "last_30d": _window(json.loads(Path(args.monthly_json).read_text()), mf, mt)}
     if args.daily_json:
         daily = json.loads(Path(args.daily_json).read_text())
-    if summary is None or daily is None:
-        fetched_summary, fetched_daily = fetch_all(daily_date)
-        summary = summary if summary is not None else fetched_summary
+    if body is None or daily is None:
+        fetched_body, fetched_daily = fetch_all(daily_date, dates["week"], dates["month"])
+        body = body if body is not None else fetched_body
         daily = daily if daily is not None else fetched_daily
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     tables = build_tables(daily, daily_date)
     (out_dir / "usage_tables.md").write_text(tables + "\n")
-    (out_dir / "usage.html").write_text(build_html(summary, now))
+    (out_dir / "usage.html").write_text(build_html(body, now))
     print(tables)
     return 0
 
