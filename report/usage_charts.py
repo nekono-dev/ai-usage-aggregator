@@ -328,7 +328,8 @@ def build_html(body: dict, today: datetime) -> str:
 <html lang="ja"><head><meta charset="utf-8">
 <title>AI利用量 {today.strftime('%Y-%m-%d')}</title>
 <style>
-body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:960px;margin:12px auto;padding:0 16px;color:#1a1a1a;line-height:1.5}}
+:root{{color-scheme:light}}
+body{{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;max-width:960px;margin:12px auto;padding:0 16px;color:#1a1a1a;background:#fff;line-height:1.5}}
 h1{{font-size:20px;margin:6px 0 2px}}
 h2{{font-size:16px;margin:14px 0 4px}}
 h3{{font-size:14px;margin:12px 0 4px}}
