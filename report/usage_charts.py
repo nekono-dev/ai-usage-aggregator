@@ -315,11 +315,15 @@ function placeLabels(row, pct) {
     val.style.left = (fillW + 6 + nameW + 8) + 'px';
   }
 }
-document.querySelectorAll('[data-chart] .row').forEach(function (r) {
-  var fill = r.querySelector('.rtrack i');
-  var pct = parseFloat((fill.style.width || '0').replace('%', '')) || 0;
-  placeLabels(r, pct);
-});
+function relayoutBars() {
+  document.querySelectorAll('[data-chart] .row').forEach(function (r) {
+    var fill = r.querySelector('.rtrack i');
+    var pct = parseFloat((fill.style.width || '0').replace('%', '')) || 0;
+    placeLabels(r, pct);
+  });
+}
+relayoutBars();
+window.addEventListener('resize', relayoutBars);
 document.querySelectorAll('[data-metric]').forEach(function (btn) {
   btn.addEventListener('click', function () {
     var key = btn.getAttribute('data-metric');
