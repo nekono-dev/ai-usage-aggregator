@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""AI利用量の日次テーブルとグラフ（棒＋円）を生成する。
+"""AI利用量の日次テーブルとグラフ（棒＋円＋折れ線）を生成する。
 
 出力:
 - usage_tables.md: 日次テーブル（Markdown、ベンダ別、モデル行は実測に
   現れたものだけ）
-- usage.html: 週次・月次の棒グラフと利用割合の円グラフ、期間ごとの
-  ベンダ別合計
+- usage.html: 週次・月次の棒グラフ、日次推移の折れ線グラフ（Claude /
+  Codex 合算）と利用割合の円グラフ、期間ごとのベンダ別合計
 
 対象日（JST）:
 - 日次: 12:00 前は前日、12:00 以降は当日
@@ -84,14 +84,31 @@ def report_dates(now: datetime) -> dict:
     }
 
 
-def _fetch_report(frm: str, to: str) -> dict:
+def _fetch_report(frm: str, to: str, group_by: str = "model") -> dict:
     if os.environ.get("AGGREGATOR_API_KEY"):
-        return _http_get(f"/v1/report?group_by=model&from={frm}&to={to}")
+        return _http_get(f"/v1/report?group_by={group_by}&from={frm}&to={to}")
     if HELPER.exists():
-        return _helper("report", "--group-by", "model", "--from", frm, "--to", to)
+        return _helper("report", "--group-by", group_by, "--from", frm, "--to", to)
     raise SystemExit(
         "データ取得手段がありません: --daily-json 等を渡すか、"
         "AGGREGATOR_API_KEY を設定してください")
+
+
+def _days(report: dict, frm: str, to: str) -> list[dict]:
+    """group_by=day の応答を期間内の全日分に整える（実測の無い日は 0）。"""
+    from datetime import date as _date
+    by_date = {g["group"]: g for g in report.get("groups", [])}
+    out = []
+    d = _date.fromisoformat(frm)
+    end = _date.fromisoformat(to)
+    while d <= end:
+        g = by_date.get(d.isoformat())
+        out.append({"date": d.isoformat(),
+                    "total_tokens": g["total_tokens"] if g else 0,
+                    "api_equivalent_cost_usd":
+                        g["api_equivalent_cost_usd"] if g else 0.0})
+        d += timedelta(days=1)
+    return out
 
 
 def _window(report: dict, frm: str, to: str) -> dict:
@@ -109,6 +126,8 @@ def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
     mf, mt = month[0].isoformat(), month[1].isoformat()
     body = {"last_7d": _window(_fetch_report(wf, wt), wf, wt),
             "last_30d": _window(_fetch_report(mf, mt), mf, mt)}
+    body["last_7d"]["by_day"] = _days(_fetch_report(wf, wt, "day"), wf, wt)
+    body["last_30d"]["by_day"] = _days(_fetch_report(mf, mt, "day"), mf, mt)
     return body, _fetch_report(daily_date, daily_date)
 
 
@@ -200,11 +219,13 @@ def assign_colors(body: dict) -> dict[str, str]:
 def bar_chart(title: str, rows: list[tuple[str, int, float, str, str]], color_of: dict) -> str:
     """横棒グラフ（HTML）。rows = (表示名, トークン量, 金額, トークン量ラベル, 金額ラベル)。
 
+    指標はタイトルで示すため、棒の中にはモデル名を置き、数値は棒の
+    外（右端のすぐ外）に置く。モデル名が棒の幅に収まらない場合は、
+    名前も棒のすぐ外に置き、その右に数値を続ける。正確な配置は JS が
+    実測幅で行い、ここでの in/out は初期表示の目安。
     ページ上部の指標切替（利用量／金額）で JS が全グラフの行を並び替え、
-    棒の長さを選んだ指標の最大値に合わせて再計算し、値ラベルも選んだ
-    指標のものに差し替える。初期表示は利用量の降順。
-    値ラベルは棒の内側（右端）に置く。棒が横幅の 50% 未満のときは
-    棒のすぐ右に置く。
+    棒の長さと数値ラベルを選んだ指標に合わせて再計算する。
+    初期表示は利用量の降順。
     """
     max_v = max((t for _, t, _, _, _ in rows), default=0) or 1
     parts = ['<div class="chart" data-chart>',
@@ -212,18 +233,93 @@ def bar_chart(title: str, rows: list[tuple[str, int, float, str, str]], color_of
     for name, tokens, cost, tok_label, cost_label in rows:
         w = tokens / max_v * 100
         color = color_of.get(name, "#666")
-        cls = "in" if w >= 50 else "out"
+        cls = "in" if w >= 40 else "out"
         parts.append(
             f'<div class="row" data-tokens="{tokens}" data-cost="{cost}" '
             f'data-tokens-label="{tok_label}" data-cost-label="{cost_label}">'
-            f'<span class="rname">{name}</span>'
-            f'<span class="rbar"><i style="width:{w:.1f}%;background:{color}"></i>'
-            f'<span class="rlabel {cls}" style="left:{w:.1f}%">{tok_label}</span></span></div>')
+            f'<span class="rbar"><span class="rtrack">'
+            f'<i style="width:{w:.1f}%;background:{color}"></i></span>'
+            f'<span class="rname {cls}">{name}</span>'
+            f'<span class="rvalue">{tok_label}</span></span></div>')
     parts.append("</div></div>")
     return "".join(parts)
 
 
+def line_chart(window: dict) -> str:
+    """日次推移の折れ線グラフ（Claude / Codex 合算、指標切替に連動）。
+
+    週次・月次の各パネルに置く。横軸は日付、縦軸は選択中の指標で、
+    指標ごとに正規化した SVG を2枚重ねて切替える（data-line）。
+    """
+    days = window.get("by_day") or []
+    if not days:
+        return ""
+    W, H = 600.0, 168.0
+    x0, x1, y_top, y_base = 4.0, 596.0, 16.0, 138.0
+    n = len(days)
+
+    def xs(i: int) -> float:
+        return x0 + (x1 - x0) * (i / (n - 1) if n > 1 else 0.5)
+
+    blocks = []
+    for key, vkey, fmt in (("tokens", "total_tokens", fmt_m),
+                           ("cost", "api_equivalent_cost_usd",
+                            lambda v: f"${v:,.2f}")):
+        vals = [d[vkey] for d in days]
+        maxv = max(vals) or 1
+        pts = [(xs(i), y_base - (v / maxv) * (y_base - y_top))
+               for i, v in enumerate(vals)]
+        line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        area = (f"M {pts[0][0]:.1f},{y_base:.1f} "
+                + " ".join(f"L {x:.1f},{y:.1f}" for x, y in pts)
+                + f" L {pts[-1][0]:.1f},{y_base:.1f} Z")
+        dots = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.4" fill="#3b82f6"/>'
+                       for x, y in pts)
+        idx = sorted({0, (n - 1) // 2, n - 1})
+        xlabels = "".join(
+            f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
+            f'text-anchor="{"start" if i == 0 else "end" if i == n - 1 else "middle"}">'
+            f'{days[i]["date"][5:]}</text>' for i in idx)
+        hidden = "" if key == "tokens" else " hidden"
+        blocks.append(
+            f'<div data-line="{key}"{hidden}>'
+            f'<svg viewBox="0 0 {W:.0f} {H:.0f}" role="img" aria-label="日次推移" '
+            f'style="width:100%;height:auto;display:block">'
+            f'<line x1="{x0}" y1="{y_top}" x2="{x1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
+            f'<line x1="{x0}" y1="{y_base}" x2="{x1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
+            f'<text x="{x0}" y="11" font-size="10" fill="currentColor">{fmt(maxv)}</text>'
+            f'<path d="{area}" fill="#3b82f6" fill-opacity="0.10"/>'
+            f'<polyline points="{line}" fill="none" stroke="#3b82f6" stroke-width="1.8"/>'
+            f'{dots}{xlabels}</svg></div>')
+    return (f'<div class="chart seg"><div class="pie-title">日次推移'
+            f'（<span data-total="tokens">利用量</span>'
+            f'<span data-total="cost" hidden>金額</span>）</div>'
+            f'{"".join(blocks)}</div>')
+
+
 SORT_SCRIPT = """<script>
+function placeLabels(row, pct) {
+  var track = row.querySelector('.rtrack');
+  var name = row.querySelector('.rname');
+  var val = row.querySelector('.rvalue');
+  if (!track || !name || !val) return;
+  var fillW = track.clientWidth * pct / 100;
+  var nameW = name.offsetWidth;
+  if (nameW + 12 <= fillW) {
+    name.className = 'rname in';
+    name.style.left = '6px';
+    val.style.left = (fillW + 6) + 'px';
+  } else {
+    name.className = 'rname out';
+    name.style.left = (fillW + 6) + 'px';
+    val.style.left = (fillW + 6 + nameW + 8) + 'px';
+  }
+}
+document.querySelectorAll('[data-chart] .row').forEach(function (r) {
+  var fill = r.querySelector('.rtrack i');
+  var pct = parseFloat((fill.style.width || '0').replace('%', '')) || 0;
+  placeLabels(r, pct);
+});
 document.querySelectorAll('[data-metric]').forEach(function (btn) {
   btn.addEventListener('click', function () {
     var key = btn.getAttribute('data-metric');
@@ -235,6 +331,9 @@ document.querySelectorAll('[data-metric]').forEach(function (btn) {
     });
     document.querySelectorAll('[data-pie]').forEach(function (p) {
       p.hidden = p.getAttribute('data-pie') !== key;
+    });
+    document.querySelectorAll('[data-line]').forEach(function (p) {
+      p.hidden = p.getAttribute('data-line') !== key;
     });
     document.querySelectorAll('[data-total]').forEach(function (s) {
       s.hidden = s.getAttribute('data-total') !== key;
@@ -254,11 +353,10 @@ document.querySelectorAll('[data-metric]').forEach(function (btn) {
       rows.forEach(function (r) {
         var v = parseFloat(r.getAttribute('data-' + key)) || 0;
         var pct = v / max * 100;
-        r.querySelector('.rbar i').style.width = pct + '%';
-        var lbl = r.querySelector('.rlabel');
-        lbl.textContent = r.getAttribute('data-' + key + '-label');
-        lbl.style.left = pct + '%';
-        lbl.className = 'rlabel ' + (pct >= 50 ? 'in' : 'out');
+        r.querySelector('.rtrack i').style.width = pct + '%';
+        var val = r.querySelector('.rvalue');
+        val.textContent = r.getAttribute('data-' + key + '-label');
+        placeLabels(r, pct);
         rowsEl.appendChild(r);
       });
     });
@@ -353,6 +451,9 @@ def build_html(body: dict, today: datetime) -> str:
         cost_items = "".join(f"<li>{t}</li>" for t in totals_cost)
         parts.append(f'<div class="chart seg"><ul class="totals-list" data-total="tokens">{tok_items}</ul>'
                      f'<ul class="totals-list" data-total="cost" hidden>{cost_items}</ul></div>')
+        lc = line_chart(w)
+        if lc:
+            parts.append(lc)
         parts.extend(charts)
         parts.append(f'<div class="chart seg" data-pie="tokens"><div class="pie-title">利用割合（利用量）</div>'
                      f'{pie_chart(w, color_of, "total_tokens")}</div>')
@@ -387,19 +488,22 @@ p{{margin:4px 0 8px}}
 .totals-list li{{margin:2px 0}}
 .pie-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
 .chart-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
-.row{{display:grid;grid-template-columns:104px 1fr;align-items:center;gap:8px;margin:5px 0;font-size:12px}}
-.rname{{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
-.rbar i{{position:absolute;left:0;top:0;height:16px}}
-.rlabel{{position:absolute;top:0;height:16px;display:flex;align-items:center;white-space:nowrap}}
-.rlabel.in{{color:#fff;transform:translateX(-100%);padding-right:6px}}
-.rlabel.out{{color:#1a1a1a;padding-left:6px}}
+.rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
+.rtrack i{{position:absolute;left:0;top:0;height:16px}}
+.rname{{position:absolute;top:0;height:16px;display:flex;align-items:center;white-space:nowrap;font-weight:600}}
+.rname.in{{color:#fff}}
+.rname.out{{color:#1a1a1a}}
+.rvalue{{position:absolute;top:0;height:16px;display:flex;align-items:center;white-space:nowrap}}
 @media (max-width:560px){{
 body{{padding:0 8px}}
-.row{{grid-template-columns:78px 1fr;gap:6px;font-size:11px}}
+.row{{font-size:11px}}
 .rbar{{height:14px}}
-.rbar i{{height:14px}}
-.rlabel{{height:14px;font-size:11px}}
+.rtrack{{right:58px;height:14px}}
+.rtrack i{{height:14px}}
+.rname{{height:14px}}
+.rvalue{{height:14px;font-size:11px}}
 .chart{{padding:8px}}
 .tab-labels label{{padding:5px 12px}}
 .metric-btns button{{padding:5px 12px}}
@@ -412,7 +516,7 @@ body{{background:#121212;color:#e8e8e8}}
 #tab-monthly:checked ~ .controls label[for='tab-monthly']{{background:#fff;color:#000;border-color:#fff}}
 .metric-btns button{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
 .metric-btns button.active{{background:#fff;color:#000;border-color:#fff}}
-.rlabel.out{{color:#e8e8e8}}
+.rname.out{{color:#e8e8e8}}
 }}
 </style>
 </head><body>
@@ -443,6 +547,10 @@ def main() -> int:
                         help="週次の /v1/report（group_by=model）応答 JSON ファイル")
     parser.add_argument("--monthly-json", default=None,
                         help="月次の /v1/report（group_by=model）応答 JSON ファイル")
+    parser.add_argument("--weekly-days-json", default=None,
+                        help="週次の /v1/report（group_by=day）応答 JSON ファイル")
+    parser.add_argument("--monthly-days-json", default=None,
+                        help="月次の /v1/report（group_by=day）応答 JSON ファイル")
     args = parser.parse_args()
 
     now = datetime.now(JST)
@@ -461,6 +569,12 @@ def main() -> int:
         fetched_body, fetched_daily = fetch_all(daily_date, dates["week"], dates["month"])
         body = body if body is not None else fetched_body
         daily = daily if daily is not None else fetched_daily
+    if args.weekly_days_json:
+        body["last_7d"]["by_day"] = _days(
+            json.loads(Path(args.weekly_days_json).read_text()), wf, wt)
+    if args.monthly_days_json:
+        body["last_30d"]["by_day"] = _days(
+            json.loads(Path(args.monthly_days_json).read_text()), mf, mt)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
