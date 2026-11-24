@@ -216,34 +216,57 @@ def assign_colors(body: dict) -> dict[str, str]:
     return color_of
 
 
-def bar_chart(title: str, rows: list[tuple[str, int, float, str, str]], color_of: dict) -> str:
-    """横棒グラフ（HTML）。rows = (表示名, トークン量, 金額, トークン量ラベル, 金額ラベル)。
+def _bar_rows(ms: list[dict], vkey: str, color_of: dict) -> str:
+    """1ベンダ分の横棒の行。vkey の降順に並べ、長さと数値を vkey で決める。
 
-    指標は上部の切替ボタンが示すため、タイトルは内訳の軸（モデル別）
-    とし、棒の中にはモデル名を置き、数値は棒の外（右端のすぐ外）に
-    置く。モデル名が棒の幅に収まらない場合は、
-    名前も棒のすぐ外に置き、その右に数値を続ける。正確な配置は JS が
-    実測幅で行い、ここでの in/out は初期表示の目安。
-    ページ上部の指標切替（利用量／金額）で JS が全グラフの行を並び替え、
-    棒の長さと数値ラベルを選んだ指標に合わせて再計算する。
-    初期表示は利用量の降順。
+    棒の中にはモデル名を置き、数値は棒の外（右端のすぐ外）に置く。
+    モデル名が棒の幅に収まらない場合は名前も棒のすぐ外に置き、その
+    右に数値を続ける。正確な配置は JS が実測幅で行い、ここでの
+    in/out は初期表示の目安。
     """
-    max_v = max((t for _, t, _, _, _ in rows), default=0) or 1
-    parts = ['<div class="chart" data-chart>',
-             f'<div class="chart-title">{title}</div><div class="rows">']
-    for name, tokens, cost, tok_label, cost_label in rows:
-        w = tokens / max_v * 100
+    max_v = max((m[vkey] for m in ms), default=0) or 1
+    parts = ['<div class="rows">']
+    for m in sorted(ms, key=lambda m: -m[vkey]):
+        name = display_name(m["model"])
+        w = m[vkey] / max_v * 100
         color = color_of.get(name, "#666")
         cls = "in" if w >= 40 else "out"
+        label = fmt_m(m[vkey]) if vkey == "total_tokens" else f"${m[vkey]:,.2f}"
         parts.append(
-            f'<div class="row" data-tokens="{tokens}" data-cost="{cost}" '
-            f'data-tokens-label="{tok_label}" data-cost-label="{cost_label}">'
+            f'<div class="row">'
             f'<span class="rbar"><span class="rtrack">'
             f'<i style="width:{w:.1f}%;background:{color}"></i></span>'
             f'<span class="rname {cls}" style="left:{"6px" if cls == "in" else f"{w:.1f}%"}">{name}</span>'
-            f'<span class="rvalue" style="left:{w:.1f}%">{tok_label}</span></span></div>')
-    parts.append("</div></div>")
+            f'<span class="rvalue" style="left:{w:.1f}%">{label}</span></span></div>')
+    parts.append("</div>")
     return "".join(parts)
+
+
+def model_chart(window: dict, color_of: dict) -> str:
+    """モデル別グラフ。ベンダ別を1つのセグメントに統合し、利用量／金額の
+    2バリアントを指標切替で切り替える（円・折れ線と同じ方式、data-bars）。
+    タイトルは「モデル別利用量／モデル別金額」。
+    """
+    variants = []
+    has_any = False
+    for key, vkey in (("tokens", "total_tokens"),
+                      ("cost", "api_equivalent_cost_usd")):
+        sections = []
+        for group in GROUPS:
+            ms = models_of(window, group)
+            if not ms:
+                continue
+            has_any = True
+            sections.append(f'<div class="vhead">{group}</div>')
+            sections.append(_bar_rows(ms, vkey, color_of))
+        hidden = "" if key == "tokens" else " hidden"
+        variants.append(f'<div data-bars="{key}"{hidden}>{"".join(sections)}</div>')
+    if not has_any:
+        return ""
+    return (f'<div class="chart seg"><div class="pie-title">モデル別'
+            f'<span data-total="tokens">利用量</span>'
+            f'<span data-total="cost" hidden>金額</span></div>'
+            f'{"".join(variants)}</div>')
 
 
 def line_chart(window: dict) -> str:
@@ -317,7 +340,7 @@ function placeLabels(row, pct) {
   }
 }
 function relayoutBars() {
-  document.querySelectorAll('[data-chart] .row').forEach(function (r) {
+  document.querySelectorAll('[data-bars] .row').forEach(function (r) {
     var fill = r.querySelector('.rtrack i');
     var pct = parseFloat((fill.style.width || '0').replace('%', '')) || 0;
     placeLabels(r, pct);
@@ -343,28 +366,10 @@ document.querySelectorAll('[data-metric]').forEach(function (btn) {
     document.querySelectorAll('[data-total]').forEach(function (s) {
       s.hidden = s.getAttribute('data-total') !== key;
     });
-    document.querySelectorAll('[data-chart]').forEach(function (chart) {
-      var rowsEl = chart.querySelector('.rows');
-      var rows = Array.prototype.slice.call(rowsEl.children);
-      var max = 0;
-      rows.forEach(function (r) {
-        max = Math.max(max, parseFloat(r.getAttribute('data-' + key)) || 0);
-      });
-      if (!max) max = 1;
-      rows.sort(function (a, b) {
-        return (parseFloat(b.getAttribute('data-' + key)) || 0)
-             - (parseFloat(a.getAttribute('data-' + key)) || 0);
-      });
-      rows.forEach(function (r) {
-        var v = parseFloat(r.getAttribute('data-' + key)) || 0;
-        var pct = v / max * 100;
-        r.querySelector('.rtrack i').style.width = pct + '%';
-        var val = r.querySelector('.rvalue');
-        val.textContent = r.getAttribute('data-' + key + '-label');
-        placeLabels(r, pct);
-        rowsEl.appendChild(r);
-      });
+    document.querySelectorAll('[data-bars]').forEach(function (p) {
+      p.hidden = p.getAttribute('data-bars') !== key;
     });
+    relayoutBars();
   });
 });
 </script>"""
@@ -433,18 +438,10 @@ def build_html(body: dict, today: datetime) -> str:
         parts = [f"<h2>{period_label}: {w['from']}〜{w['to']}</h2>"]
         totals_tok = []
         totals_cost = []
-        charts = []
         for group in GROUPS:
             ms = models_of(w, group)
             if not ms:
                 continue
-            rows = [(display_name(m["model"]), m["total_tokens"],
-                     m["api_equivalent_cost_usd"],
-                     fmt_m(m["total_tokens"]),
-                     f"${m['api_equivalent_cost_usd']:,.2f}")
-                    for m in ms]
-            charts.append(f"<h3>{group}</h3>")
-            charts.append(bar_chart("モデル別", rows, color_of))
             g_cost = sum(m["api_equivalent_cost_usd"] for m in ms)
             g_tok = sum(m["total_tokens"] for m in ms)
             totals_tok.append(f"{group} 合計: {fmt_m(g_tok)}")
@@ -459,7 +456,9 @@ def build_html(body: dict, today: datetime) -> str:
         lc = line_chart(w)
         if lc:
             parts.append(lc)
-        parts.extend(charts)
+        mc = model_chart(w, color_of)
+        if mc:
+            parts.append(mc)
         parts.append(f'<div class="chart seg" data-pie="tokens"><div class="pie-title">利用割合（利用量）</div>'
                      f'{pie_chart(w, color_of, "total_tokens")}</div>')
         parts.append(f'<div class="chart seg" data-pie="cost" hidden><div class="pie-title">利用割合（金額）</div>'
@@ -492,7 +491,8 @@ p{{margin:4px 0 8px}}
 .totals-list{{margin:0;padding-left:1.3em}}
 .totals-list li{{margin:2px 0}}
 .pie-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
-.chart-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
+.vhead{{font-weight:bold;font-size:13px;margin:8px 0 2px}}
+.vhead:first-child{{margin-top:0}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
