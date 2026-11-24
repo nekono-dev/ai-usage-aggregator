@@ -219,8 +219,9 @@ def assign_colors(body: dict) -> dict[str, str]:
 def bar_chart(title: str, rows: list[tuple[str, int, float, str, str]], color_of: dict) -> str:
     """横棒グラフ（HTML）。rows = (表示名, トークン量, 金額, トークン量ラベル, 金額ラベル)。
 
-    指標はタイトルで示すため、棒の中にはモデル名を置き、数値は棒の
-    外（右端のすぐ外）に置く。モデル名が棒の幅に収まらない場合は、
+    指標は上部の切替ボタンが示すため、タイトルは内訳の軸（モデル別）
+    とし、棒の中にはモデル名を置き、数値は棒の外（右端のすぐ外）に
+    置く。モデル名が棒の幅に収まらない場合は、
     名前も棒のすぐ外に置き、その右に数値を続ける。正確な配置は JS が
     実測幅で行い、ここでの in/out は初期表示の目安。
     ページ上部の指標切替（利用量／金額）で JS が全グラフの行を並び替え、
@@ -239,8 +240,8 @@ def bar_chart(title: str, rows: list[tuple[str, int, float, str, str]], color_of
             f'data-tokens-label="{tok_label}" data-cost-label="{cost_label}">'
             f'<span class="rbar"><span class="rtrack">'
             f'<i style="width:{w:.1f}%;background:{color}"></i></span>'
-            f'<span class="rname {cls}">{name}</span>'
-            f'<span class="rvalue">{tok_label}</span></span></div>')
+            f'<span class="rname {cls}" style="left:{"6px" if cls == "in" else f"{w:.1f}%"}">{name}</span>'
+            f'<span class="rvalue" style="left:{w:.1f}%">{tok_label}</span></span></div>')
     parts.append("</div></div>")
     return "".join(parts)
 
@@ -302,7 +303,7 @@ function placeLabels(row, pct) {
   var track = row.querySelector('.rtrack');
   var name = row.querySelector('.rname');
   var val = row.querySelector('.rvalue');
-  if (!track || !name || !val) return;
+  if (!track || !name || !val || !track.clientWidth) return;
   var fillW = track.clientWidth * pct / 100;
   var nameW = name.offsetWidth;
   if (nameW + 12 <= fillW) {
@@ -324,14 +325,14 @@ function relayoutBars() {
 }
 relayoutBars();
 window.addEventListener('resize', relayoutBars);
+document.querySelectorAll('input[name="period"]').forEach(function (inp) {
+  inp.addEventListener('change', relayoutBars);
+});
 document.querySelectorAll('[data-metric]').forEach(function (btn) {
   btn.addEventListener('click', function () {
     var key = btn.getAttribute('data-metric');
     document.querySelectorAll('[data-metric]').forEach(function (b) {
       b.classList.toggle('active', b === btn);
-    });
-    document.querySelectorAll('.chart-title').forEach(function (t) {
-      t.textContent = key === 'tokens' ? '利用量' : '金額';
     });
     document.querySelectorAll('[data-pie]').forEach(function (p) {
       p.hidden = p.getAttribute('data-pie') !== key;
@@ -443,7 +444,7 @@ def build_html(body: dict, today: datetime) -> str:
                      f"${m['api_equivalent_cost_usd']:,.2f}")
                     for m in ms]
             charts.append(f"<h3>{group}</h3>")
-            charts.append(bar_chart("利用量", rows, color_of))
+            charts.append(bar_chart("モデル別", rows, color_of))
             g_cost = sum(m["api_equivalent_cost_usd"] for m in ms)
             g_tok = sum(m["total_tokens"] for m in ms)
             totals_tok.append(f"{group} 合計: {fmt_m(g_tok)}")
