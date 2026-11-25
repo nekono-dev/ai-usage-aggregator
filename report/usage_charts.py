@@ -4,8 +4,8 @@
 出力:
 - usage_tables.md: 日次テーブル（Markdown、ベンダ別、モデル行は実測に
   現れたものだけ）
-- usage.html: 週次・月次の棒グラフ、日次推移の折れ線グラフ（Claude /
-  Codex 合算、近似曲線付き）と利用割合の円グラフ
+- usage.html: 週次・月次の棒グラフ、日次推移の折れ線グラフ（トータル /
+  Claude / Codex の3系列）と利用割合の円グラフ
 
 対象日（JST）:
 - 日次: 12:00 前は前日、12:00 以降は当日
@@ -120,6 +120,17 @@ def _window(report: dict, frm: str, to: str) -> dict:
         for g in report.get("groups", [])]}
 
 
+def _day_vendors(day: str) -> dict:
+    """1日分のモデル別実測をベンダ別に合算する（折れ線の系列用）。"""
+    out: dict = {}
+    for g in _fetch_report(day, day, "model").get("groups", []):
+        v = out.setdefault(group_of(g["group"]),
+                           {"total_tokens": 0, "api_equivalent_cost_usd": 0.0})
+        v["total_tokens"] += g["total_tokens"]
+        v["api_equivalent_cost_usd"] += g["api_equivalent_cost_usd"]
+    return out
+
+
 def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
     """(windows, daily report) を取得する。windows は last_7d/last_30d。"""
     wf, wt = week[0].isoformat(), week[1].isoformat()
@@ -128,6 +139,15 @@ def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
             "last_30d": _window(_fetch_report(mf, mt), mf, mt)}
     body["last_7d"]["by_day"] = _days(_fetch_report(wf, wt, "day"), wf, wt)
     body["last_30d"]["by_day"] = _days(_fetch_report(mf, mt, "day"), mf, mt)
+    # 折れ線のベンダ別系列: 月次ウィンドウの全日分（週次はその部分集合）
+    from concurrent.futures import ThreadPoolExecutor
+    dates = [d["date"] for d in body["last_30d"]["by_day"]]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        vendors = dict(zip(dates, ex.map(_day_vendors, dates)))
+    for w in ("last_7d", "last_30d"):
+        for d in body[w]["by_day"]:
+            if d["date"] in vendors:
+                d["vendors"] = vendors[d["date"]]
     return body, _fetch_report(daily_date, daily_date)
 
 
@@ -271,38 +291,18 @@ def model_chart(window: dict, color_of: dict) -> str:
             f'{"".join(variants)}</div>')
 
 
-def _polyfit(xs: list[float], ys: list[float], deg: int) -> list[float]:
-    """最小二乗法による多項式近似の係数（次数の昇順）を返す。"""
-    m = deg + 1
-    ata = [[sum(x ** (i + j) for x in xs) for j in range(m)] for i in range(m)]
-    aty = [sum(y * x ** i for x, y in zip(xs, ys)) for i in range(m)]
-    for col in range(m):
-        piv = max(range(col, m), key=lambda r: abs(ata[r][col]))
-        if abs(ata[piv][col]) < 1e-12:
-            continue
-        ata[col], ata[piv] = ata[piv], ata[col]
-        aty[col], aty[piv] = aty[piv], aty[col]
-        for r in range(col + 1, m):
-            f = ata[r][col] / ata[col][col]
-            for c in range(col, m):
-                ata[r][c] -= f * ata[col][c]
-            aty[r] -= f * aty[col]
-    coef = [0.0] * m
-    for i in range(m - 1, -1, -1):
-        if abs(ata[i][i]) < 1e-12:
-            continue
-        coef[i] = (aty[i] - sum(ata[i][j] * coef[j]
-                                for j in range(i + 1, m))) / ata[i][i]
-    return coef
+LINE_SERIES = (("Total", "トータル", "#6b7280"),
+               ("Claude", "Claude", "#2563eb"),
+               ("Codex", "Codex", "#16a34a"))
 
 
 def line_chart(window: dict) -> str:
-    """日次推移の折れ線グラフ（Claude / Codex 合算、指標切替に連動）。
+    """日次推移の折れ線グラフ（トータル / Claude / Codex の3系列）。
 
     週次・月次の各パネルに置く。横軸は日付、縦軸は選択中の指標で、
     指標ごとに正規化した SVG を2枚重ねて切替える（data-line）。
-    実測の折れ線に加え、2次多項式の最小二乗近似による近似曲線を
-    破線で重ねる。
+    ベンダ別系列は by_day の vendors（日ごとのモデル別実測をベンダ別に
+    合算したもの）から作る。vendors が無い日はトータルのみ描く。
     """
     days = window.get("by_day") or []
     if not days:
@@ -310,36 +310,46 @@ def line_chart(window: dict) -> str:
     W, H = 600.0, 168.0
     x0, x1, y_top, y_base = 4.0, 596.0, 16.0, 138.0
     n = len(days)
+    has_vendors = any(d.get("vendors") for d in days)
+    series = [s for s in LINE_SERIES if s[0] == "Total" or has_vendors]
 
     def xs(i: int) -> float:
         return x0 + (x1 - x0) * (i / (n - 1) if n > 1 else 0.5)
 
+    def value(d: dict, name: str, vkey: str):
+        if name == "Total":
+            return d[vkey]
+        v = (d.get("vendors") or {}).get(name)
+        return v[vkey] if v else 0
+
+    legend = "".join(
+        f'<span class="lleg-i"><span class="lleg-s" '
+        f'style="background:{color}"></span>{label}</span>'
+        for _name, label, color in series)
     blocks = []
     for key, vkey, fmt in (("tokens", "total_tokens", fmt_m),
                            ("cost", "api_equivalent_cost_usd",
                             lambda v: f"${v:,.2f}")):
-        vals = [d[vkey] for d in days]
-        maxv = max(vals) or 1
-        pts = [(xs(i), y_base - (v / maxv) * (y_base - y_top))
-               for i, v in enumerate(vals)]
-        line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-        area = (f"M {pts[0][0]:.1f},{y_base:.1f} "
-                + " ".join(f"L {x:.1f},{y:.1f}" for x, y in pts)
-                + f" L {pts[-1][0]:.1f},{y_base:.1f} Z")
-        dots = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.4" fill="#3b82f6"/>'
-                       for x, y in pts)
-        deg = 2 if n >= 5 else 1
-        coef = _polyfit([i / (n - 1) if n > 1 else 0.5 for i in range(n)],
-                        [float(v) for v in vals], deg)
-        fit_pts = []
-        for s in range(49):
-            t = s / 48
-            fv = sum(c * t ** k for k, c in enumerate(coef))
-            fy = y_base - (fv / maxv) * (y_base - y_top)
-            fit_pts.append((x0 + (x1 - x0) * t, min(max(fy, 6.0), y_base)))
-        fit_line = " ".join(f"{x:.1f},{y:.1f}" for x, y in fit_pts)
-        fit = (f'<polyline points="{fit_line}" fill="none" stroke="#f59e0b" '
-               f'stroke-width="1.6" stroke-dasharray="5 3"/>')
+        maxv = max(d[vkey] for d in days) or 1
+
+        def pts_of(name: str):
+            return [(xs(i), y_base - (value(d, name, vkey) / maxv)
+                     * (y_base - y_top)) for i, d in enumerate(days)]
+
+        tpts = pts_of("Total")
+        area = (f"M {tpts[0][0]:.1f},{y_base:.1f} "
+                + " ".join(f"L {x:.1f},{y:.1f}" for x, y in tpts)
+                + f" L {tpts[-1][0]:.1f},{y_base:.1f} Z")
+        lines = ""
+        for name, _label, color in reversed(series):
+            pts = tpts if name == "Total" else pts_of(name)
+            pl = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+            lines += (f'<polyline points="{pl}" fill="none" stroke="{color}" '
+                      f'stroke-width="1.8"/>')
+            if name == "Total":
+                lines += "".join(
+                    f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.4" fill="{color}"/>'
+                    for x, y in pts)
         idx = sorted({0, (n - 1) // 2, n - 1})
         xlabels = "".join(
             f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
@@ -353,12 +363,12 @@ def line_chart(window: dict) -> str:
             f'<line x1="{x0}" y1="{y_top}" x2="{x1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
             f'<line x1="{x0}" y1="{y_base}" x2="{x1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
             f'<text x="{x0}" y="11" font-size="10" fill="currentColor">{fmt(maxv)}</text>'
-            f'<path d="{area}" fill="#3b82f6" fill-opacity="0.10"/>'
-            f'<polyline points="{line}" fill="none" stroke="#3b82f6" stroke-width="1.8"/>'
-            f'{fit}{dots}{xlabels}</svg></div>')
+            f'<path d="{area}" fill="#6b7280" fill-opacity="0.07"/>'
+            f'{lines}{xlabels}</svg></div>')
     return (f'<div class="chart seg"><div class="pie-title">日次推移'
             f'（<span data-total="tokens">利用量</span>'
             f'<span data-total="cost" hidden>金額</span>）</div>'
+            f'<div class="lleg">{legend}</div>'
             f'{"".join(blocks)}</div>')
 
 
@@ -513,6 +523,9 @@ p{{margin:4px 0 8px}}
 .chart{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;background:#fff}}
 .seg{{margin:8px 0}}
 .pie-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
+.lleg{{display:flex;gap:14px;font-size:11px;margin:0 0 4px}}
+.lleg-i{{display:inline-flex;align-items:center;gap:5px}}
+.lleg-s{{display:inline-block;width:14px;height:3px;border-radius:2px}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
