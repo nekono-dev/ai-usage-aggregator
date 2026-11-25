@@ -291,9 +291,9 @@ def model_chart(window: dict, color_of: dict) -> str:
             f'{"".join(variants)}</div>')
 
 
-LINE_SERIES = (("Total", "トータル", "#6b7280"),
-               ("Claude", "Claude", "#2563eb"),
-               ("Codex", "Codex", "#16a34a"))
+LINE_SERIES = (("Total", "トータル", FAMILY_COLORS["Other"][0]),
+               ("Claude", "Claude", FAMILY_COLORS["Claude"][0]),
+               ("Codex", "Codex", FAMILY_COLORS["Codex"][0]))
 
 
 def line_chart(window: dict) -> str:
@@ -337,15 +337,13 @@ def line_chart(window: dict) -> str:
                      * (y_base - y_top)) for i, d in enumerate(days)]
 
         tpts = pts_of("Total")
-        area = (f"M {tpts[0][0]:.1f},{y_base:.1f} "
-                + " ".join(f"L {x:.1f},{y:.1f}" for x, y in tpts)
-                + f" L {tpts[-1][0]:.1f},{y_base:.1f} Z")
         lines = ""
         for name, _label, color in reversed(series):
             pts = tpts if name == "Total" else pts_of(name)
             pl = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+            dash = ' stroke-dasharray="5 3"' if name == "Total" else ""
             lines += (f'<polyline points="{pl}" fill="none" stroke="{color}" '
-                      f'stroke-width="1.8"/>')
+                      f'stroke-width="1.8"{dash}/>')
             if name == "Total":
                 lines += "".join(
                     f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.4" fill="{color}"/>'
@@ -363,7 +361,6 @@ def line_chart(window: dict) -> str:
             f'<line x1="{x0}" y1="{y_top}" x2="{x1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
             f'<line x1="{x0}" y1="{y_base}" x2="{x1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
             f'<text x="{x0}" y="11" font-size="10" fill="currentColor">{fmt(maxv)}</text>'
-            f'<path d="{area}" fill="#6b7280" fill-opacity="0.07"/>'
             f'{lines}{xlabels}</svg></div>')
     return (f'<div class="chart seg"><div class="pie-title">日次推移'
             f'（<span data-total="tokens">利用量</span>'
