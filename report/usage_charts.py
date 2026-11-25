@@ -297,12 +297,14 @@ LINE_SERIES = (("Total", "トータル", FAMILY_COLORS["Other"][0]),
 
 
 def line_chart(window: dict) -> str:
-    """日次推移の折れ線グラフ（トータル / Claude / Codex の3系列）。
+    """日次推移の積み上げ式折れ線グラフ（Claude / Codex / トータル）。
 
     週次・月次の各パネルに置く。横軸は日付、縦軸は選択中の指標で、
     指標ごとに正規化した SVG を2枚重ねて切替える（data-line）。
-    ベンダ別系列は by_day の vendors（日ごとのモデル別実測をベンダ別に
-    合算したもの）から作る。vendors が無い日はトータルのみ描く。
+    積み上げ式とし、Codex の線は Claude との累積値を示す。トータルは
+    全体の合計（点線）。ベンダ別系列は by_day の vendors（日ごとの
+    モデル別実測をベンダ別に合算したもの）から作る。vendors が無い
+    日はトータルのみ描く。
     """
     days = window.get("by_day") or []
     if not days:
@@ -319,8 +321,13 @@ def line_chart(window: dict) -> str:
     def value(d: dict, name: str, vkey: str):
         if name == "Total":
             return d[vkey]
-        v = (d.get("vendors") or {}).get(name)
-        return v[vkey] if v else 0
+        vendors = d.get("vendors") or {}
+        v = vendors.get(name)
+        base = v[vkey] if v else 0
+        if name == "Codex":  # 積み上げ: Codex の線は Claude との累積
+            c = vendors.get("Claude")
+            base += c[vkey] if c else 0
+        return base
 
     legend = "".join(
         f'<span class="lleg-i"><span class="lleg-s" '
