@@ -298,7 +298,7 @@ BAND_COLORS = {"Claude": "#c24b42", "Codex": "#3f66b3", "Other": "#707070"}
 LINE_SERIES = (("Claude", "Claude", BAND_COLORS["Claude"]),
                ("Codex", "Codex", BAND_COLORS["Codex"]),
                ("Other", "Other", BAND_COLORS["Other"]))
-LABEL_MIN_BAND_H = 15.0
+LABEL_MIN_BAND_H = 19.0
 
 
 def line_chart(window: dict) -> str:
@@ -360,17 +360,17 @@ def line_chart(window: dict) -> str:
 
         # ラベル配置: 帯の厚みと見積り幅で内側／外側を決める
         def est_w(text: str) -> float:
-            return 14.0 + len(text) * 6.4
+            return 14.0 + len(text) * 8.1
 
         outside = {}
         for name, label, _c, top, bottom, final in bands:
             h = (top[-1] - (bottom[-1] if bottom else 0)) * scale
             outside[name] = h < LABEL_MIN_BAND_H
-        px1 = x_right - (132.0 if any(outside.values()) else 0.0)
+        px1 = x_right - (150.0 if any(outside.values()) else 0.0)
         for name, label, _c, top, bottom, final in bands:
             if not outside[name] and est_w(f"{label} {fmt(final)}") > (px1 - x0) * 0.6:
                 outside[name] = True
-                px1 = x_right - 132.0
+                px1 = x_right - 150.0
 
         def xs(i: int) -> float:
             return x0 + (px1 - x0) * (i / (n - 1) if n > 1 else 0.5)
@@ -399,13 +399,13 @@ def line_chart(window: dict) -> str:
                 shapes += (
                     f'<rect x="{px1 + 8:.1f}" y="{cy - 5:.1f}" width="10" height="10" '
                     f'fill="{color}" stroke="#fff" stroke-width="1.5"/>'
-                    f'<text class="alabel-out" x="{px1 + 22:.1f}" y="{cy + 4:.1f}">{text}</text>')
+                    f'<text class="alabel-out" x="{px1 + 22:.1f}" y="{cy + 5:.1f}">{text}</text>')
             else:
                 gx = px1 - 8 - est_w(text)
                 shapes += (
                     f'<rect x="{gx:.1f}" y="{cy - 5:.1f}" width="10" height="10" '
                     f'fill="{color}" stroke="#fff" stroke-width="1.5"/>'
-                    f'<text class="alabel" x="{gx + 14:.1f}" y="{cy + 4:.1f}">{text}</text>')
+                    f'<text class="alabel" x="{gx + 14:.1f}" y="{cy + 5:.1f}">{text}</text>')
         idx = sorted({0, (n - 1) // 2, n - 1})
         xlabels = "".join(
             f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
@@ -580,8 +580,8 @@ p{{margin:4px 0 8px}}
 .lleg{{display:flex;gap:14px;font-size:11px;margin:0 0 4px}}
 .lleg-i{{display:inline-flex;align-items:center;gap:5px}}
 .lleg-s{{display:inline-block;width:14px;height:3px;border-radius:2px}}
-.alabel{{font-size:11px;font-weight:bold;fill:#fff;paint-order:stroke;stroke:rgba(0,0,0,0.28);stroke-width:3px;stroke-linejoin:round}}
-.alabel-out{{font-size:11px;font-weight:bold;fill:currentColor}}
+.alabel{{font-size:14px;font-weight:bold;fill:#fff;paint-order:stroke;stroke:rgba(0,0,0,0.28);stroke-width:3px;stroke-linejoin:round}}
+.alabel-out{{font-size:14px;font-weight:bold;fill:currentColor}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
