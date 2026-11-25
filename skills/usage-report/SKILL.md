@@ -12,8 +12,14 @@ description: ai-usage-aggregator の実測データから AI 利用量レポー�
 
 - `usage_tables.md`: 日次テーブル（ベンダ別・モデル別。行はその日の
   実測に現れたモデルだけ）
-- `usage.html`: 週次・月次の棒グラフ（ラベルは「$金額 / トークン量」）、
-  期間ごとのベンダ別合計、利用割合の円グラフ
+- `usage.html`: 日次推移の折れ線グラフ（Claude / Codex 合算。横軸は
+  日付、縦軸は上部の利用量／金額トグルに連動し、期間は週次／月次
+  タブで切り替わる。2次多項式の最小二乗近似による近似曲線を破線で
+  重ねる）、モデル別グラフ（タイトルは「モデル別利用量／モデル別
+  金額」。ベンダの区切りを置かず全モデルを同列に並べ、表示順は
+  Claude → Codex、グループ内は指標の降順。棒の中にモデル名、数値
+  は棒の外。名前が棒に収まらない行は名前も棒の外）、利用割合の
+  円グラフ。いずれも利用量／金額の2バリアントを切り替える
 
 ## 前提
 
@@ -32,7 +38,10 @@ description: ai-usage-aggregator の実測データから AI 利用量レポー�
 
 1. 取得済み JSON を渡す: `--daily-json` / `--weekly-json` /
    `--monthly-json`（いずれも /v1/report?group_by=model の応答。
-   期間はスクリプトが決める対象日に合わせること）
+   期間はスクリプトが決める対象日に合わせること）。折れ線グラフ用
+   の日次系列は `--weekly-days-json` / `--monthly-days-json`
+   （/v1/report?group_by=day の応答）で渡す。渡さない場合は API /
+   ヘルパーから group_by=day で取得する
 2. 環境変数で直接取得: `AGGREGATOR_BASE_URL`（既定
    `http://localhost:8000`）と `AGGREGATOR_API_KEY`
 3. Muse のカスタムコネクタ（custom.ai-usage-aggregator）がある環境
