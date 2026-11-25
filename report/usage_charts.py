@@ -5,7 +5,7 @@
 - usage_tables.md: 日次テーブル（Markdown、ベンダ別、モデル行は実測に
   現れたものだけ）
 - usage.html: 週次・月次の棒グラフ、日次推移の折れ線グラフ（Claude /
-  Codex 合算）と利用割合の円グラフ、期間ごとのベンダ別合計
+  Codex 合算、近似曲線付き）と利用割合の円グラフ
 
 対象日（JST）:
 - 日次: 12:00 前は前日、12:00 以降は当日
@@ -269,11 +269,38 @@ def model_chart(window: dict, color_of: dict) -> str:
             f'{"".join(variants)}</div>')
 
 
+def _polyfit(xs: list[float], ys: list[float], deg: int) -> list[float]:
+    """最小二乗法による多項式近似の係数（次数の昇順）を返す。"""
+    m = deg + 1
+    ata = [[sum(x ** (i + j) for x in xs) for j in range(m)] for i in range(m)]
+    aty = [sum(y * x ** i for x, y in zip(xs, ys)) for i in range(m)]
+    for col in range(m):
+        piv = max(range(col, m), key=lambda r: abs(ata[r][col]))
+        if abs(ata[piv][col]) < 1e-12:
+            continue
+        ata[col], ata[piv] = ata[piv], ata[col]
+        aty[col], aty[piv] = aty[piv], aty[col]
+        for r in range(col + 1, m):
+            f = ata[r][col] / ata[col][col]
+            for c in range(col, m):
+                ata[r][c] -= f * ata[col][c]
+            aty[r] -= f * aty[col]
+    coef = [0.0] * m
+    for i in range(m - 1, -1, -1):
+        if abs(ata[i][i]) < 1e-12:
+            continue
+        coef[i] = (aty[i] - sum(ata[i][j] * coef[j]
+                                for j in range(i + 1, m))) / ata[i][i]
+    return coef
+
+
 def line_chart(window: dict) -> str:
     """日次推移の折れ線グラフ（Claude / Codex 合算、指標切替に連動）。
 
     週次・月次の各パネルに置く。横軸は日付、縦軸は選択中の指標で、
     指標ごとに正規化した SVG を2枚重ねて切替える（data-line）。
+    実測の折れ線に加え、2次多項式の最小二乗近似による近似曲線を
+    破線で重ねる。
     """
     days = window.get("by_day") or []
     if not days:
@@ -299,6 +326,21 @@ def line_chart(window: dict) -> str:
                 + f" L {pts[-1][0]:.1f},{y_base:.1f} Z")
         dots = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.4" fill="#3b82f6"/>'
                        for x, y in pts)
+        deg = 2 if n >= 5 else 1
+        coef = _polyfit([i / (n - 1) if n > 1 else 0.5 for i in range(n)],
+                        [float(v) for v in vals], deg)
+        fit_pts = []
+        for s in range(49):
+            t = s / 48
+            fv = sum(c * t ** k for k, c in enumerate(coef))
+            fy = y_base - (fv / maxv) * (y_base - y_top)
+            fit_pts.append((x0 + (x1 - x0) * t, min(max(fy, 6.0), y_base)))
+        fit_line = " ".join(f"{x:.1f},{y:.1f}" for x, y in fit_pts)
+        fit_label_y = min(max(fit_pts[-1][1] - 6, 10.0), y_base - 2)
+        fit = (f'<polyline points="{fit_line}" fill="none" stroke="#f59e0b" '
+               f'stroke-width="1.6" stroke-dasharray="5 3"/>'
+               f'<text x="{x1:.1f}" y="{fit_label_y:.1f}" font-size="10" '
+               f'fill="#f59e0b" text-anchor="end">近似</text>')
         idx = sorted({0, (n - 1) // 2, n - 1})
         xlabels = "".join(
             f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
@@ -314,7 +356,7 @@ def line_chart(window: dict) -> str:
             f'<text x="{x0}" y="11" font-size="10" fill="currentColor">{fmt(maxv)}</text>'
             f'<path d="{area}" fill="#3b82f6" fill-opacity="0.10"/>'
             f'<polyline points="{line}" fill="none" stroke="#3b82f6" stroke-width="1.8"/>'
-            f'{dots}{xlabels}</svg></div>')
+            f'{fit}{dots}{xlabels}</svg></div>')
     return (f'<div class="chart seg"><div class="pie-title">日次推移'
             f'（<span data-total="tokens">利用量</span>'
             f'<span data-total="cost" hidden>金額</span>）</div>'
@@ -436,23 +478,6 @@ def build_html(body: dict, today: datetime) -> str:
                                       ("last_30d", "月次", "monthly")):
         w = body[key]
         parts = [f"<h2>{period_label}: {w['from']}〜{w['to']}</h2>"]
-        totals_tok = []
-        totals_cost = []
-        for group in GROUPS:
-            ms = models_of(w, group)
-            if not ms:
-                continue
-            g_cost = sum(m["api_equivalent_cost_usd"] for m in ms)
-            g_tok = sum(m["total_tokens"] for m in ms)
-            totals_tok.append(f"{group} 合計: {fmt_m(g_tok)}")
-            totals_cost.append(f"{group} 合計: ${g_cost:,.2f}")
-        # ベンダ別合計は期間見出しの直下に置く（特定ベンダの節に属さないため）。
-        # 他のグラフと同じ box セグメントに収め、箇条書きで示す。
-        # 指標切替に連動し、選択中の指標の合計だけを見せる
-        tok_items = "".join(f"<li>{t}</li>" for t in totals_tok)
-        cost_items = "".join(f"<li>{t}</li>" for t in totals_cost)
-        parts.append(f'<div class="chart seg"><ul class="totals-list" data-total="tokens">{tok_items}</ul>'
-                     f'<ul class="totals-list" data-total="cost" hidden>{cost_items}</ul></div>')
         lc = line_chart(w)
         if lc:
             parts.append(lc)
@@ -488,8 +513,6 @@ p{{margin:4px 0 8px}}
 #tab-monthly:checked ~ .controls label[for='tab-monthly']{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
 .chart{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;background:#fff}}
 .seg{{margin:8px 0}}
-.totals-list{{margin:0;padding-left:1.3em}}
-.totals-list li{{margin:2px 0}}
 .pie-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
 .vhead{{font-weight:bold;font-size:13px;margin:8px 0 2px}}
 .vhead:first-child{{margin-top:0}}
