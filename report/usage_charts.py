@@ -4,8 +4,8 @@
 出力:
 - usage_tables.md: 日次テーブル（Markdown、ベンダ別、モデル行は実測に
   現れたものだけ）
-- usage.html: 週次・月次の棒グラフ、日次推移の折れ線グラフ（トータル /
-  Claude / Codex の3系列）と利用割合の円グラフ
+- usage.html: 週次・月次の棒グラフ、日次推移の積み上げ面グラフ
+  （範囲内の累積、Claude / Codex / トータル）と利用割合の円グラフ
 
 対象日（JST）:
 - 日次: 12:00 前は前日、12:00 以降は当日
@@ -297,14 +297,14 @@ LINE_SERIES = (("Total", "トータル", FAMILY_COLORS["Other"][0]),
 
 
 def line_chart(window: dict) -> str:
-    """日次推移の積み上げ式折れ線グラフ（Claude / Codex / トータル）。
+    """日次推移の積み上げ面グラフ（範囲内の累積、Claude / Codex / トータル）。
 
     週次・月次の各パネルに置く。横軸は日付、縦軸は選択中の指標で、
     指標ごとに正規化した SVG を2枚重ねて切替える（data-line）。
-    積み上げ式とし、Codex の線は Claude との累積値を示す。トータルは
-    全体の合計（点線）。ベンダ別系列は by_day の vendors（日ごとの
-    モデル別実測をベンダ別に合算したもの）から作る。vendors が無い
-    日はトータルのみ描く。
+    値は範囲の最も古い日から日次実測を累積した合計で、右端が期間の
+    合計になる。帯は下から Claude、Codex の順に積み上げ、トータルは
+    上端を点線で示す。ベンダ別内訳は by_day の vendors から作る。
+    vendors が無い場合は全体を1つの帯として描く。
     """
     days = window.get("by_day") or []
     if not days:
@@ -318,16 +318,9 @@ def line_chart(window: dict) -> str:
     def xs(i: int) -> float:
         return x0 + (x1 - x0) * (i / (n - 1) if n > 1 else 0.5)
 
-    def value(d: dict, name: str, vkey: str):
-        if name == "Total":
-            return d[vkey]
-        vendors = d.get("vendors") or {}
-        v = vendors.get(name)
-        base = v[vkey] if v else 0
-        if name == "Codex":  # 積み上げ: Codex の線は Claude との累積
-            c = vendors.get("Claude")
-            base += c[vkey] if c else 0
-        return base
+    def vend(d: dict, name: str, vkey: str):
+        v = (d.get("vendors") or {}).get(name)
+        return v[vkey] if v else 0
 
     legend = "".join(
         f'<span class="lleg-i"><span class="lleg-s" '
@@ -337,24 +330,47 @@ def line_chart(window: dict) -> str:
     for key, vkey, fmt in (("tokens", "total_tokens", fmt_m),
                            ("cost", "api_equivalent_cost_usd",
                             lambda v: f"${v:,.2f}")):
-        maxv = max(d[vkey] for d in days) or 1
+        cum_claude, cum_codex, cum_total = [], [], []
+        a = b = t = 0
+        for d in days:
+            a += vend(d, "Claude", vkey)
+            b += vend(d, "Codex", vkey)
+            t += d[vkey]
+            cum_claude.append(a)
+            cum_codex.append(a + b)
+            cum_total.append(t)
+        maxv = max(cum_total) or 1
 
-        def pts_of(name: str):
-            return [(xs(i), y_base - (value(d, name, vkey) / maxv)
-                     * (y_base - y_top)) for i, d in enumerate(days)]
+        def pts_of(cum: list) -> list:
+            return [(xs(i), y_base - (v / maxv) * (y_base - y_top))
+                    for i, v in enumerate(cum)]
 
-        tpts = pts_of("Total")
-        lines = ""
-        for name, _label, color in reversed(series):
-            pts = tpts if name == "Total" else pts_of(name)
-            pl = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-            dash = ' stroke-dasharray="5 3"' if name == "Total" else ""
-            lines += (f'<polyline points="{pl}" fill="none" stroke="{color}" '
-                      f'stroke-width="1.8"{dash}/>')
-            if name == "Total":
-                lines += "".join(
-                    f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.4" fill="{color}"/>'
-                    for x, y in pts)
+        def area_path(top: list, bottom: list | None) -> str:
+            fwd = " ".join(f"L {x:.1f},{y:.1f}" for x, y in top)
+            if bottom is None:
+                return (f"M {top[0][0]:.1f},{y_base:.1f} {fwd} "
+                        f"L {top[-1][0]:.1f},{y_base:.1f} Z")
+            back = " ".join(f"L {x:.1f},{y:.1f}" for x, y in reversed(bottom))
+            return f"M {top[0][0]:.1f},{top[0][1]:.1f} {fwd} {back} Z"
+
+        colors = {name: color for name, _l, color in LINE_SERIES}
+        shapes = ""
+        if has_vendors:
+            shapes += (f'<path d="{area_path(pts_of(cum_claude), None)}" '
+                       f'fill="{colors["Claude"]}"/>')
+            shapes += (f'<path d="{area_path(pts_of(cum_codex), pts_of(cum_claude))}" '
+                       f'fill="{colors["Codex"]}"/>')
+            if any(vend(d, "Other", vkey) for d in days):
+                shapes += (f'<path d="{area_path(pts_of(cum_total), pts_of(cum_codex))}" '
+                           f'fill="{colors["Total"]}"/>')
+        else:
+            shapes += (f'<path d="{area_path(pts_of(cum_total), None)}" '
+                       f'fill="{colors["Total"]}"/>')
+        tpts = pts_of(cum_total)
+        tline = " ".join(f"{x:.1f},{y:.1f}" for x, y in tpts)
+        shapes += (f'<polyline points="{tline}" fill="none" '
+                   f'stroke="{colors["Total"]}" stroke-width="1.8" '
+                   f'stroke-dasharray="5 3"/>')
         idx = sorted({0, (n - 1) // 2, n - 1})
         xlabels = "".join(
             f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
@@ -368,7 +384,7 @@ def line_chart(window: dict) -> str:
             f'<line x1="{x0}" y1="{y_top}" x2="{x1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
             f'<line x1="{x0}" y1="{y_base}" x2="{x1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
             f'<text x="{x0}" y="11" font-size="10" fill="currentColor">{fmt(maxv)}</text>'
-            f'{lines}{xlabels}</svg></div>')
+            f'{shapes}{xlabels}</svg></div>')
     return (f'<div class="chart seg"><div class="pie-title">日次推移'
             f'（<span data-total="tokens">利用量</span>'
             f'<span data-total="cost" hidden>金額</span>）</div>'
