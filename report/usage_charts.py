@@ -217,7 +217,8 @@ def assign_colors(body: dict) -> dict[str, str]:
 
 
 def _bar_rows(ms: list[dict], vkey: str, color_of: dict) -> str:
-    """1ベンダ分の横棒の行。vkey の降順に並べ、長さと数値を vkey で決める。
+    """横棒の行を与えられた順で描く。長さと数値は vkey で決め、全行の
+    最大値を基準に正規化する。
 
     棒の中にはモデル名を置き、数値は棒の外（右端のすぐ外）に置く。
     モデル名が棒の幅に収まらない場合は名前も棒のすぐ外に置き、その
@@ -226,7 +227,7 @@ def _bar_rows(ms: list[dict], vkey: str, color_of: dict) -> str:
     """
     max_v = max((m[vkey] for m in ms), default=0) or 1
     parts = ['<div class="rows">']
-    for m in sorted(ms, key=lambda m: -m[vkey]):
+    for m in ms:
         name = display_name(m["model"])
         w = m[vkey] / max_v * 100
         color = color_of.get(name, "#666")
@@ -243,7 +244,9 @@ def _bar_rows(ms: list[dict], vkey: str, color_of: dict) -> str:
 
 
 def model_chart(window: dict, color_of: dict) -> str:
-    """モデル別グラフ。ベンダ別を1つのセグメントに統合し、利用量／金額の
+    """モデル別グラフ。ベンダの区切りを置かず、全モデルを同列に並べる。
+    表示順は Claude → Codex → Other（グループ内は指標の降順）で、
+    ベンダをまたいだ数値順の並び替えはしない。利用量／金額の
     2バリアントを指標切替で切り替える（円・折れ線と同じ方式、data-bars）。
     タイトルは「モデル別利用量／モデル別金額」。
     """
@@ -251,16 +254,15 @@ def model_chart(window: dict, color_of: dict) -> str:
     has_any = False
     for key, vkey in (("tokens", "total_tokens"),
                       ("cost", "api_equivalent_cost_usd")):
-        sections = []
+        ms = []
         for group in GROUPS:
-            ms = models_of(window, group)
-            if not ms:
-                continue
+            ms.extend(sorted(models_of(window, group),
+                             key=lambda m: -m[vkey]))
+        if ms:
             has_any = True
-            sections.append(f'<div class="vhead">{group}</div>')
-            sections.append(_bar_rows(ms, vkey, color_of))
         hidden = "" if key == "tokens" else " hidden"
-        variants.append(f'<div data-bars="{key}"{hidden}>{"".join(sections)}</div>')
+        variants.append(f'<div data-bars="{key}"{hidden}>'
+                        f'{_bar_rows(ms, vkey, color_of) if ms else ""}</div>')
     if not has_any:
         return ""
     return (f'<div class="chart seg"><div class="pie-title">モデル別'
@@ -336,11 +338,8 @@ def line_chart(window: dict) -> str:
             fy = y_base - (fv / maxv) * (y_base - y_top)
             fit_pts.append((x0 + (x1 - x0) * t, min(max(fy, 6.0), y_base)))
         fit_line = " ".join(f"{x:.1f},{y:.1f}" for x, y in fit_pts)
-        fit_label_y = min(max(fit_pts[-1][1] - 6, 10.0), y_base - 2)
         fit = (f'<polyline points="{fit_line}" fill="none" stroke="#f59e0b" '
-               f'stroke-width="1.6" stroke-dasharray="5 3"/>'
-               f'<text x="{x1:.1f}" y="{fit_label_y:.1f}" font-size="10" '
-               f'fill="#f59e0b" text-anchor="end">近似</text>')
+               f'stroke-width="1.6" stroke-dasharray="5 3"/>')
         idx = sorted({0, (n - 1) // 2, n - 1})
         xlabels = "".join(
             f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
@@ -514,8 +513,6 @@ p{{margin:4px 0 8px}}
 .chart{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;background:#fff}}
 .seg{{margin:8px 0}}
 .pie-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
-.vhead{{font-weight:bold;font-size:13px;margin:8px 0 2px}}
-.vhead:first-child{{margin-top:0}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
