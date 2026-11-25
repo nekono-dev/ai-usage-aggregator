@@ -291,59 +291,89 @@ def model_chart(window: dict, color_of: dict) -> str:
             f'{"".join(variants)}</div>')
 
 
-LINE_SERIES = (("Total", "トータル", FAMILY_COLORS["Other"][0]),
-               ("Claude", "Claude", FAMILY_COLORS["Claude"][0]),
-               ("Codex", "Codex", FAMILY_COLORS["Codex"][0]))
+LINE_SERIES = (("Claude", "Claude", FAMILY_COLORS["Claude"][0]),
+               ("Codex", "Codex", FAMILY_COLORS["Codex"][0]),
+               ("Other", "Other", FAMILY_COLORS["Other"][0]))
+BAND_OPACITY = 0.55
+LABEL_MIN_BAND_H = 15.0
 
 
 def line_chart(window: dict) -> str:
-    """日次推移の積み上げ面グラフ（範囲内の累積、Claude / Codex / トータル）。
+    """日次推移の積み上げ面グラフ（範囲内の累積、Claude / Codex）。
 
     週次・月次の各パネルに置く。横軸は日付、縦軸は選択中の指標で、
     指標ごとに正規化した SVG を2枚重ねて切替える（data-line）。
     値は範囲の最も古い日から日次実測を累積した合計で、右端が期間の
-    合計になる。帯は下から Claude、Codex の順に積み上げ、トータルは
-    上端を点線で示す。ベンダ別内訳は by_day の vendors から作る。
+    合計になる。帯は下から Claude、Codex の順に積み上げる。上端が
+    そのまま合計なので、合計の線は重ねない（UI 原則14）。
+    凡例は行として置かず、帯の中に色チップ・製品名・累積の最終値を
+    書く。帯の最終的な厚みが閾値未満の場合、そのラベルはグラフの
+    右側（帯の外）に書く。ベンダ別内訳は by_day の vendors から作る。
     vendors が無い場合は全体を1つの帯として描く。
     """
     days = window.get("by_day") or []
     if not days:
         return ""
     W, H = 600.0, 168.0
-    x0, x1, y_top, y_base = 4.0, 596.0, 16.0, 138.0
+    x0, x_right, y_top, y_base = 4.0, 596.0, 16.0, 138.0
     n = len(days)
     has_vendors = any(d.get("vendors") for d in days)
-    series = [s for s in LINE_SERIES if s[0] == "Total" or has_vendors]
-
-    def xs(i: int) -> float:
-        return x0 + (x1 - x0) * (i / (n - 1) if n > 1 else 0.5)
 
     def vend(d: dict, name: str, vkey: str):
         v = (d.get("vendors") or {}).get(name)
         return v[vkey] if v else 0
 
-    legend = "".join(
-        f'<span class="lleg-i"><span class="lleg-s" '
-        f'style="background:{color}"></span>{label}</span>'
-        for _name, label, color in series)
     blocks = []
     for key, vkey, fmt in (("tokens", "total_tokens", fmt_m),
                            ("cost", "api_equivalent_cost_usd",
                             lambda v: f"${v:,.2f}")):
-        cum_claude, cum_codex, cum_total = [], [], []
-        a = b = t = 0
+        cum = {"Claude": [], "Codex": [], "Other": [], "Total": []}
+        run = dict.fromkeys(cum, 0)
         for d in days:
-            a += vend(d, "Claude", vkey)
-            b += vend(d, "Codex", vkey)
-            t += d[vkey]
-            cum_claude.append(a)
-            cum_codex.append(a + b)
-            cum_total.append(t)
-        maxv = max(cum_total) or 1
+            for name in ("Claude", "Codex", "Other"):
+                run[name] += vend(d, name, vkey)
+            run["Total"] += d[vkey]
+            cum["Claude"].append(run["Claude"])
+            cum["Codex"].append(run["Claude"] + run["Codex"])
+            cum["Other"].append(run["Claude"] + run["Codex"] + run["Other"])
+            cum["Total"].append(run["Total"])
+        maxv = max(cum["Total"]) or 1
+        scale = (y_base - y_top) / maxv
 
-        def pts_of(cum: list) -> list:
-            return [(xs(i), y_base - (v / maxv) * (y_base - y_top))
-                    for i, v in enumerate(cum)]
+        bands = []  # (name, label, color, top_cum, bottom_cum, final_value)
+        if has_vendors:
+            prev = None
+            for name, label, color in LINE_SERIES:
+                top = cum[name]
+                if not any(vend(d, name, vkey) for d in days):
+                    prev = top
+                    continue
+                bands.append((name, label, color, top, prev,
+                              top[-1] - (prev[-1] if prev else 0)))
+                prev = top
+        else:
+            bands.append(("Total", "トータル", FAMILY_COLORS["Other"][0],
+                          cum["Total"], None, cum["Total"][-1]))
+
+        # ラベル配置: 帯の厚みと見積り幅で内側／外側を決める
+        def est_w(text: str) -> float:
+            return 14.0 + len(text) * 6.4
+
+        outside = {}
+        for name, label, _c, top, bottom, final in bands:
+            h = (top[-1] - (bottom[-1] if bottom else 0)) * scale
+            outside[name] = h < LABEL_MIN_BAND_H
+        px1 = x_right - (132.0 if any(outside.values()) else 0.0)
+        for name, label, _c, top, bottom, final in bands:
+            if not outside[name] and est_w(f"{label} {fmt(final)}") > (px1 - x0) * 0.6:
+                outside[name] = True
+                px1 = x_right - 132.0
+
+        def xs(i: int) -> float:
+            return x0 + (px1 - x0) * (i / (n - 1) if n > 1 else 0.5)
+
+        def pts_of(c: list) -> list:
+            return [(xs(i), y_base - v * scale) for i, v in enumerate(c)]
 
         def area_path(top: list, bottom: list | None) -> str:
             fwd = " ".join(f"L {x:.1f},{y:.1f}" for x, y in top)
@@ -353,24 +383,26 @@ def line_chart(window: dict) -> str:
             back = " ".join(f"L {x:.1f},{y:.1f}" for x, y in reversed(bottom))
             return f"M {top[0][0]:.1f},{top[0][1]:.1f} {fwd} {back} Z"
 
-        colors = {name: color for name, _l, color in LINE_SERIES}
         shapes = ""
-        if has_vendors:
-            shapes += (f'<path d="{area_path(pts_of(cum_claude), None)}" '
-                       f'fill="{colors["Claude"]}"/>')
-            shapes += (f'<path d="{area_path(pts_of(cum_codex), pts_of(cum_claude))}" '
-                       f'fill="{colors["Codex"]}"/>')
-            if any(vend(d, "Other", vkey) for d in days):
-                shapes += (f'<path d="{area_path(pts_of(cum_total), pts_of(cum_codex))}" '
-                           f'fill="{colors["Total"]}"/>')
-        else:
-            shapes += (f'<path d="{area_path(pts_of(cum_total), None)}" '
-                       f'fill="{colors["Total"]}"/>')
-        tpts = pts_of(cum_total)
-        tline = " ".join(f"{x:.1f},{y:.1f}" for x, y in tpts)
-        shapes += (f'<polyline points="{tline}" fill="none" '
-                   f'stroke="{colors["Total"]}" stroke-width="1.8" '
-                   f'stroke-dasharray="5 3"/>')
+        for _name, _label, color, top, bottom, _final in bands:
+            shapes += (f'<path d="{area_path(pts_of(top), pts_of(bottom) if bottom else None)}" '
+                       f'fill="{color}" fill-opacity="{BAND_OPACITY}"/>')
+        for name, label, color, top, bottom, final in bands:
+            t_y = y_base - top[-1] * scale
+            b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
+            cy = (t_y + b_y) / 2
+            text = f"{label} {fmt(final)}"
+            if outside[name]:
+                shapes += (
+                    f'<rect x="{px1 + 8:.1f}" y="{cy - 5:.1f}" width="10" height="10" '
+                    f'fill="{color}" stroke="#fff" stroke-width="1.5"/>'
+                    f'<text class="alabel-out" x="{px1 + 22:.1f}" y="{cy + 4:.1f}">{text}</text>')
+            else:
+                gx = px1 - 8 - est_w(text)
+                shapes += (
+                    f'<rect x="{gx:.1f}" y="{cy - 5:.1f}" width="10" height="10" '
+                    f'fill="{color}" stroke="#fff" stroke-width="1.5"/>'
+                    f'<text class="alabel" x="{gx + 14:.1f}" y="{cy + 4:.1f}">{text}</text>')
         idx = sorted({0, (n - 1) // 2, n - 1})
         xlabels = "".join(
             f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
@@ -381,14 +413,13 @@ def line_chart(window: dict) -> str:
             f'<div data-line="{key}"{hidden}>'
             f'<svg viewBox="0 0 {W:.0f} {H:.0f}" role="img" aria-label="日次推移" '
             f'style="width:100%;height:auto;display:block">'
-            f'<line x1="{x0}" y1="{y_top}" x2="{x1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
-            f'<line x1="{x0}" y1="{y_base}" x2="{x1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
+            f'<line x1="{x0}" y1="{y_top}" x2="{px1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
+            f'<line x1="{x0}" y1="{y_base}" x2="{px1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
             f'<text x="{x0}" y="11" font-size="10" fill="currentColor">{fmt(maxv)}</text>'
             f'{shapes}{xlabels}</svg></div>')
     return (f'<div class="chart seg"><div class="pie-title">日次推移'
             f'（<span data-total="tokens">利用量</span>'
             f'<span data-total="cost" hidden>金額</span>）</div>'
-            f'<div class="lleg">{legend}</div>'
             f'{"".join(blocks)}</div>')
 
 
@@ -546,6 +577,8 @@ p{{margin:4px 0 8px}}
 .lleg{{display:flex;gap:14px;font-size:11px;margin:0 0 4px}}
 .lleg-i{{display:inline-flex;align-items:center;gap:5px}}
 .lleg-s{{display:inline-block;width:14px;height:3px;border-radius:2px}}
+.alabel{{font-size:11px;font-weight:bold;fill:#1a1a1a;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}}
+.alabel-out{{font-size:11px;font-weight:bold;fill:currentColor}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
@@ -575,6 +608,7 @@ body{{background:#121212;color:#e8e8e8}}
 .metric-btns button{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
 .metric-btns button.active{{background:#fff;color:#000;border-color:#fff}}
 .rname.out{{color:#e8e8e8}}
+.alabel{{fill:#f5f5f5;stroke:rgba(0,0,0,0.65)}}
 }}
 </style>
 </head><body>
