@@ -291,10 +291,13 @@ def model_chart(window: dict, color_of: dict) -> str:
             f'{"".join(variants)}</div>')
 
 
-LINE_SERIES = (("Claude", "Claude", FAMILY_COLORS["Claude"][0]),
-               ("Codex", "Codex", FAMILY_COLORS["Codex"][0]),
-               ("Other", "Other", FAMILY_COLORS["Other"][0]))
-BAND_OPACITY = 0.55
+# 積み上げ面の帯は、大きな面同士の色差を抑えるため、棒・円の階調
+# パレットとは別に、明度を落とした深い色調のペアを使う（2026-11-26
+# ユーザ決定「案2」）。Claude は暖色系、Codex は寒色系。
+BAND_COLORS = {"Claude": "#c24b42", "Codex": "#3f66b3", "Other": "#707070"}
+LINE_SERIES = (("Claude", "Claude", BAND_COLORS["Claude"]),
+               ("Codex", "Codex", BAND_COLORS["Codex"]),
+               ("Other", "Other", BAND_COLORS["Other"]))
 LABEL_MIN_BAND_H = 15.0
 
 
@@ -352,7 +355,7 @@ def line_chart(window: dict) -> str:
                               top[-1] - (prev[-1] if prev else 0)))
                 prev = top
         else:
-            bands.append(("Total", "トータル", FAMILY_COLORS["Other"][0],
+            bands.append(("Total", "トータル", BAND_COLORS["Other"],
                           cum["Total"], None, cum["Total"][-1]))
 
         # ラベル配置: 帯の厚みと見積り幅で内側／外側を決める
@@ -386,7 +389,7 @@ def line_chart(window: dict) -> str:
         shapes = ""
         for _name, _label, color, top, bottom, _final in bands:
             shapes += (f'<path d="{area_path(pts_of(top), pts_of(bottom) if bottom else None)}" '
-                       f'fill="{color}" fill-opacity="{BAND_OPACITY}"/>')
+                       f'fill="{color}"/>')
         for name, label, color, top, bottom, final in bands:
             t_y = y_base - top[-1] * scale
             b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
@@ -577,7 +580,7 @@ p{{margin:4px 0 8px}}
 .lleg{{display:flex;gap:14px;font-size:11px;margin:0 0 4px}}
 .lleg-i{{display:inline-flex;align-items:center;gap:5px}}
 .lleg-s{{display:inline-block;width:14px;height:3px;border-radius:2px}}
-.alabel{{font-size:11px;font-weight:bold;fill:#1a1a1a;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}}
+.alabel{{font-size:11px;font-weight:bold;fill:#fff;paint-order:stroke;stroke:rgba(0,0,0,0.28);stroke-width:3px;stroke-linejoin:round}}
 .alabel-out{{font-size:11px;font-weight:bold;fill:currentColor}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
@@ -608,7 +611,7 @@ body{{background:#121212;color:#e8e8e8}}
 .metric-btns button{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
 .metric-btns button.active{{background:#fff;color:#000;border-color:#fff}}
 .rname.out{{color:#e8e8e8}}
-.alabel{{fill:#f5f5f5;stroke:rgba(0,0,0,0.65)}}
+.alabel{{fill:#fff;stroke:rgba(0,0,0,0.65)}}
 }}
 </style>
 </head><body>
