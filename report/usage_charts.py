@@ -120,23 +120,15 @@ def _window(report: dict, frm: str, to: str) -> dict:
         for g in report.get("groups", [])]}
 
 
-def _day_detail(day: str) -> dict:
-    """1日分のモデル別実測と、そのベンダ別合算を返す。
-
-    models は積み上げ棒グラフ用、vendors は折れ線の系列用。
-    """
-    models: dict = {}
-    vendors: dict = {}
+def _day_vendors(day: str) -> dict:
+    """1日分のモデル別実測をベンダ別に合算する（折れ線の系列用）。"""
+    out: dict = {}
     for g in _fetch_report(day, day, "model").get("groups", []):
-        m = models.setdefault(g["group"],
-                              {"total_tokens": 0, "api_equivalent_cost_usd": 0.0})
-        m["total_tokens"] += g["total_tokens"]
-        m["api_equivalent_cost_usd"] += g["api_equivalent_cost_usd"]
-        v = vendors.setdefault(group_of(g["group"]),
-                               {"total_tokens": 0, "api_equivalent_cost_usd": 0.0})
+        v = out.setdefault(group_of(g["group"]),
+                           {"total_tokens": 0, "api_equivalent_cost_usd": 0.0})
         v["total_tokens"] += g["total_tokens"]
         v["api_equivalent_cost_usd"] += g["api_equivalent_cost_usd"]
-    return {"models": models, "vendors": vendors}
+    return out
 
 
 def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
@@ -147,17 +139,15 @@ def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
             "last_30d": _window(_fetch_report(mf, mt), mf, mt)}
     body["last_7d"]["by_day"] = _days(_fetch_report(wf, wt, "day"), wf, wt)
     body["last_30d"]["by_day"] = _days(_fetch_report(mf, mt, "day"), mf, mt)
-    # 日次系列（折れ線のベンダ別系列と積み上げ棒のモデル別内訳）:
-    # 月次ウィンドウの全日分を取得し、週次はその部分集合を再利用する
+    # 折れ線のベンダ別系列: 月次ウィンドウの全日分（週次はその部分集合）
     from concurrent.futures import ThreadPoolExecutor
     dates = [d["date"] for d in body["last_30d"]["by_day"]]
     with ThreadPoolExecutor(max_workers=6) as ex:
-        details = dict(zip(dates, ex.map(_day_detail, dates)))
+        vendors = dict(zip(dates, ex.map(_day_vendors, dates)))
     for w in ("last_7d", "last_30d"):
         for d in body[w]["by_day"]:
-            if d["date"] in details:
-                d["models"] = details[d["date"]]["models"]
-                d["vendors"] = details[d["date"]]["vendors"]
+            if d["date"] in vendors:
+                d["vendors"] = vendors[d["date"]]
     return body, _fetch_report(daily_date, daily_date)
 
 
@@ -246,81 +236,58 @@ def assign_colors(body: dict) -> dict[str, str]:
     return color_of
 
 
-def model_chart(window: dict, color_of: dict) -> str:
-    """モデル別グラフ: 日ごとの積み上げ棒グラフ。
+def _bar_rows(ms: list[dict], vkey: str, color_of: dict) -> str:
+    """横棒の行を与えられた順で描く。長さと数値は vkey で決め、全行の
+    最大値を基準に正規化する。
 
-    横軸は日付で、各日の棒をその日のモデル別実測で積み上げる。
-    積み上げ順は Claude → Codex → Other（グループ内は期間合計の
-    降順）で統一し、色は円グラフと共通のパレットを使う。モデル名は
-    凡例で示す。利用量／金額の2バリアントを指標切替で切り替える
-    （円・折れ線と同じ方式、data-bars）。タイトルは「モデル別
-    利用量／モデル別金額」。日ごとのモデル別内訳（by_day の models）
-    が無い場合は、日次合計のみの棒になる。
+    棒の中にはモデル名を置き、数値は棒の外（右端のすぐ外）に置く。
+    モデル名が棒の幅に収まらない場合は名前も棒のすぐ外に置き、その
+    右に数値を続ける。正確な配置は JS が実測幅で行い、ここでの
+    in/out は初期表示の目安。
     """
-    days = window.get("by_day") or []
-    if not days:
-        return ""
-    order: list[str] = []
-    for group in GROUPS:
-        order.extend(m["model"] for m in sorted(
-            models_of(window, group), key=lambda m: -m["total_tokens"]))
-    if not order and not any(d["total_tokens"] for d in days):
-        return ""
-    W, H = 600.0, 168.0
-    x0, x1, y_top, y_base = 4.0, 596.0, 16.0, 138.0
-    n = len(days)
-    slot = (x1 - x0) / n
-    bar_w = max(slot * 0.72, 1.5)
+    max_v = max((m[vkey] for m in ms), default=0) or 1
+    parts = ['<div class="rows">']
+    for m in ms:
+        name = display_name(m["model"])
+        w = m[vkey] / max_v * 100
+        color = color_of.get(name, "#666")
+        cls = "in" if w >= 40 else "out"
+        label = fmt_m(m[vkey]) if vkey == "total_tokens" else f"${m[vkey]:,.2f}"
+        parts.append(
+            f'<div class="row">'
+            f'<span class="rbar"><span class="rtrack">'
+            f'<i style="width:{w:.1f}%;background:{color}"></i></span>'
+            f'<span class="rname {cls}" style="left:{"6px" if cls == "in" else f"{w:.1f}%"}">{name}</span>'
+            f'<span class="rvalue" style="left:{w:.1f}%">{label}</span></span></div>')
+    parts.append("</div>")
+    return "".join(parts)
 
-    def cx(i: int) -> float:
-        return x0 + slot * (i + 0.5)
 
-    legend = "".join(
-        f'<span class="lleg-i"><span class="lleg-s" '
-        f'style="background:{color_of.get(display_name(m), "#666")}"></span>'
-        f'{display_name(m)}</span>' for m in order)
+def model_chart(window: dict, color_of: dict) -> str:
+    """モデル別グラフ。ベンダの区切りを置かず、全モデルを同列に並べる。
+    表示順は Claude → Codex → Other（グループ内は指標の降順）で、
+    ベンダをまたいだ数値順の並び替えはしない。利用量／金額の
+    2バリアントを指標切替で切り替える（円・折れ線と同じ方式、data-bars）。
+    タイトルは「モデル別利用量／モデル別金額」。
+    """
     variants = []
-    for key, vkey, fmt in (("tokens", "total_tokens", fmt_m),
-                           ("cost", "api_equivalent_cost_usd",
-                            lambda v: f"${v:,.2f}")):
-        maxv = max(d[vkey] for d in days) or 1
-        rects = []
-        for i, d in enumerate(days):
-            models = d.get("models") or {}
-            y = y_base
-            if models:
-                segs = [(m, models[m][vkey]) for m in order
-                        if models.get(m, {}).get(vkey)]
-            else:
-                segs = [(None, d[vkey])] if d[vkey] else []
-            for model, v in segs:
-                h = (v / maxv) * (y_base - y_top)
-                if h <= 0:
-                    continue
-                y -= h
-                color = (color_of.get(display_name(model), "#666")
-                         if model else "#666666")
-                rects.append(
-                    f'<rect x="{cx(i) - bar_w / 2:.1f}" y="{y:.1f}" '
-                    f'width="{bar_w:.1f}" height="{h:.1f}" fill="{color}"/>')
-        idx = sorted({0, (n - 1) // 2, n - 1})
-        xlabels = "".join(
-            f'<text x="{cx(i):.1f}" y="156" font-size="10" fill="currentColor" '
-            f'text-anchor="{"start" if i == 0 else "end" if i == n - 1 else "middle"}">'
-            f'{days[i]["date"][5:]}</text>' for i in idx)
+    has_any = False
+    for key, vkey in (("tokens", "total_tokens"),
+                      ("cost", "api_equivalent_cost_usd")):
+        ms = []
+        for group in GROUPS:
+            ms.extend(sorted(models_of(window, group),
+                             key=lambda m: -m[vkey]))
+        if ms:
+            has_any = True
         hidden = "" if key == "tokens" else " hidden"
-        variants.append(
-            f'<div data-bars="{key}"{hidden}>'
-            f'<svg viewBox="0 0 {W:.0f} {H:.0f}" role="img" aria-label="モデル別" '
-            f'style="width:100%;height:auto;display:block">'
-            f'<line x1="{x0}" y1="{y_top}" x2="{x1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
-            f'<line x1="{x0}" y1="{y_base}" x2="{x1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
-            f'<text x="{x0}" y="11" font-size="10" fill="currentColor">{fmt(maxv)}</text>'
-            f'{"".join(rects)}{xlabels}</svg></div>')
+        variants.append(f'<div data-bars="{key}"{hidden}>'
+                        f'{_bar_rows(ms, vkey, color_of) if ms else ""}</div>')
+    if not has_any:
+        return ""
     return (f'<div class="chart seg"><div class="pie-title">モデル別'
             f'<span data-total="tokens">利用量</span>'
             f'<span data-total="cost" hidden>金額</span></div>'
-            f'<div class="lleg" style="flex-wrap:wrap">{legend}</div>'
             f'{"".join(variants)}</div>')
 
 
