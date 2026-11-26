@@ -298,7 +298,6 @@ BAND_COLORS = {"Claude": "#c24b42", "Codex": "#3f66b3", "Other": "#707070"}
 LINE_SERIES = (("Claude", "Claude", BAND_COLORS["Claude"]),
                ("Codex", "Codex", BAND_COLORS["Codex"]),
                ("Other", "Other", BAND_COLORS["Other"]))
-LABEL_MIN_BAND_H = 19.0
 
 
 def line_chart(window: dict) -> str:
@@ -310,8 +309,9 @@ def line_chart(window: dict) -> str:
     合計になる。帯は下から Claude、Codex の順に積み上げる。上端が
     そのまま合計なので、合計の線は重ねない（UI 原則14）。
     凡例は行として置かず、帯の中に色チップ・製品名・累積の最終値を
-    書く。ラベルの横幅全体が帯に収まらない場合、そのラベルは
-    グラフの右側（帯の外）に書く。ベンダ別内訳は by_day の vendors から作る。
+    書く。ラベルは常にグラフの内部に置き、帯に収まらない場合は
+    グラフ内部へはみ出す方向にずらす。注記のために描画エリアを
+    狭めることはしない。ベンダ別内訳は by_day の vendors から作る。
     vendors が無い場合は全体を1つの帯として描く。
     """
     days = window.get("by_day") or []
@@ -387,33 +387,28 @@ def line_chart(window: dict) -> str:
                     return ay if bx == ax else ay + (by - ay) * (x - ax) / (bx - ax)
             return pts[-1][1]
 
-        # 帯内ラベルは、ラベルの横幅全体が帯に収まる場合だけ帯内に置く。
-        # 帯の上端は左へ向かって下がるため、右端の厚みだけで判定すると
-        # ラベルの左上隅が帯からはみ出す。左端位置での上端に合わせ、
-        # 必要なら帯の中でラベルを下へずらす。収まらない帯は右側（外）。
-        def band_label_cy(top, bottom, text):
-            t_y = y_base - top[-1] * scale
-            b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
-            if b_y - t_y < LABEL_MIN_BAND_H or est_w(text) > (px1 - x0) * 0.6:
-                return None
-            top_at_left = interp_y(pts_of(top), px1 - 8 - est_w(text))
-            cy = max((t_y + b_y) / 2, top_at_left + 11.0)
-            return cy if cy + 11.0 <= b_y else None
-
+        # ラベルは常にグラフの内部に置く（注記のために描画エリアを
+        # 狭めない）。基本は帯の中心に置き、帯の上端が左へ向かって
+        # 下がる分でラベルの左上隅が帯の上へ出る場合は、その分だけ
+        # 下へずらす（はみ出す方向はグラフ内部＝隣の帯側）。
         label_cy = {}
         for name, label, _c, top, bottom, final in bands:
-            cy = band_label_cy(top, bottom, f"{label} {fmt(final)}")
-            if cy is not None:
-                label_cy[name] = cy
-        if len(label_cy) < len(bands):
-            px1 = x_right - 150.0
-            label_cy = {}
-            for name, label, _c, top, bottom, final in bands:
-                cy = band_label_cy(top, bottom, f"{label} {fmt(final)}")
-                if cy is not None:
-                    label_cy[name] = cy
-        outside = {name: name not in label_cy
-                   for name, _l, _c, _t, _b, _f in bands}
+            text = f"{label} {fmt(final)}"
+            t_y = y_base - top[-1] * scale
+            b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
+            top_at_left = interp_y(pts_of(top), x_right - 8 - est_w(text))
+            cy = max((t_y + b_y) / 2, top_at_left + 11.0)
+            label_cy[name] = min(cy, y_base - 11.0)
+
+        # ラベル同士が近すぎる場合は、下の帯のラベルを下へ逃がして
+        # 17px の間隔を確保する（逃がし切れない場合だけ上のを上げる）。
+        names = [b[0] for b in bands]
+        for i in range(1, len(names)):
+            upper, lower = names[i], names[i - 1]
+            if label_cy[upper] > label_cy[lower] - 17.0:
+                label_cy[lower] = min(y_base - 11.0, label_cy[upper] + 17.0)
+            if label_cy[upper] > label_cy[lower] - 17.0:
+                label_cy[upper] = label_cy[lower] - 17.0
 
         shapes = ""
         for _name, _label, color, top, bottom, _final in bands:
@@ -422,19 +417,13 @@ def line_chart(window: dict) -> str:
         for name, label, color, top, bottom, final in bands:
             t_y = y_base - top[-1] * scale
             b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
-            cy = label_cy.get(name, (t_y + b_y) / 2)
+            cy = label_cy[name]
             text = f"{label} {fmt(final)}"
-            if outside[name]:
-                shapes += (
-                    f'<rect x="{px1 + 8:.1f}" y="{cy - 5:.1f}" width="10" height="10" '
-                    f'fill="{color}" stroke="#fff" stroke-width="1.5"/>'
-                    f'<text class="alabel-out" x="{px1 + 22:.1f}" y="{cy + 5:.1f}">{text}</text>')
-            else:
-                gx = px1 - 8 - est_w(text)
-                shapes += (
-                    f'<rect x="{gx:.1f}" y="{cy - 5:.1f}" width="10" height="10" '
-                    f'fill="{color}" stroke="#fff" stroke-width="1.5"/>'
-                    f'<text class="alabel" x="{gx + 14:.1f}" y="{cy + 5:.1f}">{text}</text>')
+            gx = x_right - 8 - est_w(text)
+            shapes += (
+                f'<rect x="{gx:.1f}" y="{cy - 5:.1f}" width="10" height="10" '
+                f'fill="{color}" stroke="#fff" stroke-width="1.5"/>'
+                f'<text class="alabel" x="{gx + 14:.1f}" y="{cy + 5:.1f}">{text}</text>')
         idx = sorted({0, (n - 1) // 2, n - 1})
         xlabels = "".join(
             f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
@@ -610,7 +599,6 @@ p{{margin:4px 0 8px}}
 .lleg-i{{display:inline-flex;align-items:center;gap:5px}}
 .lleg-s{{display:inline-block;width:14px;height:3px;border-radius:2px}}
 .alabel{{font-size:14px;font-weight:bold;fill:#fff}}
-.alabel-out{{font-size:14px;font-weight:bold;fill:currentColor}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
