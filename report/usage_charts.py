@@ -4,8 +4,8 @@
 出力:
 - usage_tables.md: 日次テーブル（Markdown、ベンダ別、モデル行は実測に
   現れたものだけ）
-- usage.html: 週次・月次の棒グラフ、日次推移の折れ線グラフ（Claude /
-  Codex 合算、近似曲線付き）と利用割合の円グラフ
+- usage.html: 週次・月次の棒グラフ、日次推移の積み上げ面グラフ
+  （範囲内の累積、Claude / Codex / トータル）と利用割合の円グラフ
 
 対象日（JST）:
 - 日次: 12:00 前は前日、12:00 以降は当日
@@ -120,6 +120,17 @@ def _window(report: dict, frm: str, to: str) -> dict:
         for g in report.get("groups", [])]}
 
 
+def _day_vendors(day: str) -> dict:
+    """1日分のモデル別実測をベンダ別に合算する（折れ線の系列用）。"""
+    out: dict = {}
+    for g in _fetch_report(day, day, "model").get("groups", []):
+        v = out.setdefault(group_of(g["group"]),
+                           {"total_tokens": 0, "api_equivalent_cost_usd": 0.0})
+        v["total_tokens"] += g["total_tokens"]
+        v["api_equivalent_cost_usd"] += g["api_equivalent_cost_usd"]
+    return out
+
+
 def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
     """(windows, daily report) を取得する。windows は last_7d/last_30d。"""
     wf, wt = week[0].isoformat(), week[1].isoformat()
@@ -128,6 +139,15 @@ def fetch_all(daily_date: str, week: tuple, month: tuple) -> tuple[dict, dict]:
             "last_30d": _window(_fetch_report(mf, mt), mf, mt)}
     body["last_7d"]["by_day"] = _days(_fetch_report(wf, wt, "day"), wf, wt)
     body["last_30d"]["by_day"] = _days(_fetch_report(mf, mt, "day"), mf, mt)
+    # 折れ線のベンダ別系列: 月次ウィンドウの全日分（週次はその部分集合）
+    from concurrent.futures import ThreadPoolExecutor
+    dates = [d["date"] for d in body["last_30d"]["by_day"]]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        vendors = dict(zip(dates, ex.map(_day_vendors, dates)))
+    for w in ("last_7d", "last_30d"):
+        for d in body[w]["by_day"]:
+            if d["date"] in vendors:
+                d["vendors"] = vendors[d["date"]]
     return body, _fetch_report(daily_date, daily_date)
 
 
@@ -271,75 +291,139 @@ def model_chart(window: dict, color_of: dict) -> str:
             f'{"".join(variants)}</div>')
 
 
-def _polyfit(xs: list[float], ys: list[float], deg: int) -> list[float]:
-    """最小二乗法による多項式近似の係数（次数の昇順）を返す。"""
-    m = deg + 1
-    ata = [[sum(x ** (i + j) for x in xs) for j in range(m)] for i in range(m)]
-    aty = [sum(y * x ** i for x, y in zip(xs, ys)) for i in range(m)]
-    for col in range(m):
-        piv = max(range(col, m), key=lambda r: abs(ata[r][col]))
-        if abs(ata[piv][col]) < 1e-12:
-            continue
-        ata[col], ata[piv] = ata[piv], ata[col]
-        aty[col], aty[piv] = aty[piv], aty[col]
-        for r in range(col + 1, m):
-            f = ata[r][col] / ata[col][col]
-            for c in range(col, m):
-                ata[r][c] -= f * ata[col][c]
-            aty[r] -= f * aty[col]
-    coef = [0.0] * m
-    for i in range(m - 1, -1, -1):
-        if abs(ata[i][i]) < 1e-12:
-            continue
-        coef[i] = (aty[i] - sum(ata[i][j] * coef[j]
-                                for j in range(i + 1, m))) / ata[i][i]
-    return coef
+# 積み上げ面の帯は、大きな面同士の色差を抑えるため、棒・円の階調
+# パレットとは別に、明度を落とした深い色調のペアを使う（2026-11-26
+# ユーザ決定「案2」）。Claude は暖色系、Codex は寒色系。
+BAND_COLORS = {"Claude": "#c24b42", "Codex": "#3f66b3", "Other": "#707070"}
+LINE_SERIES = (("Claude", "Claude", BAND_COLORS["Claude"]),
+               ("Codex", "Codex", BAND_COLORS["Codex"]),
+               ("Other", "Other", BAND_COLORS["Other"]))
 
 
 def line_chart(window: dict) -> str:
-    """日次推移の折れ線グラフ（Claude / Codex 合算、指標切替に連動）。
+    """日次推移の積み上げ面グラフ（範囲内の累積、Claude / Codex）。
 
     週次・月次の各パネルに置く。横軸は日付、縦軸は選択中の指標で、
     指標ごとに正規化した SVG を2枚重ねて切替える（data-line）。
-    実測の折れ線に加え、2次多項式の最小二乗近似による近似曲線を
-    破線で重ねる。
+    値は範囲の最も古い日から日次実測を累積した合計で、右端が期間の
+    合計になる。帯は下から Claude、Codex の順に積み上げる。上端が
+    そのまま合計なので、合計の線は重ねない（UI 原則14）。
+    凡例は行として置かず、帯の中に色チップ・製品名・累積の最終値を
+    書く。ラベルは常にグラフの内部に置き、帯に収まらない場合は
+    グラフ内部へはみ出す方向にずらす。注記のために描画エリアを
+    狭めることはしない。ベンダ別内訳は by_day の vendors から作る。
+    vendors が無い場合は全体を1つの帯として描く。
     """
     days = window.get("by_day") or []
     if not days:
         return ""
     W, H = 600.0, 168.0
-    x0, x1, y_top, y_base = 4.0, 596.0, 16.0, 138.0
+    x0, x_right, y_top, y_base = 4.0, 596.0, 16.0, 138.0
     n = len(days)
+    has_vendors = any(d.get("vendors") for d in days)
 
-    def xs(i: int) -> float:
-        return x0 + (x1 - x0) * (i / (n - 1) if n > 1 else 0.5)
+    def vend(d: dict, name: str, vkey: str):
+        v = (d.get("vendors") or {}).get(name)
+        return v[vkey] if v else 0
 
     blocks = []
     for key, vkey, fmt in (("tokens", "total_tokens", fmt_m),
                            ("cost", "api_equivalent_cost_usd",
                             lambda v: f"${v:,.2f}")):
-        vals = [d[vkey] for d in days]
-        maxv = max(vals) or 1
-        pts = [(xs(i), y_base - (v / maxv) * (y_base - y_top))
-               for i, v in enumerate(vals)]
-        line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-        area = (f"M {pts[0][0]:.1f},{y_base:.1f} "
-                + " ".join(f"L {x:.1f},{y:.1f}" for x, y in pts)
-                + f" L {pts[-1][0]:.1f},{y_base:.1f} Z")
-        dots = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.4" fill="#3b82f6"/>'
-                       for x, y in pts)
-        deg = 2 if n >= 5 else 1
-        coef = _polyfit([i / (n - 1) if n > 1 else 0.5 for i in range(n)],
-                        [float(v) for v in vals], deg)
-        fit_pts = []
-        for s in range(49):
-            t = s / 48
-            fv = sum(c * t ** k for k, c in enumerate(coef))
-            fy = y_base - (fv / maxv) * (y_base - y_top)
-            fit_pts.append((x0 + (x1 - x0) * t, min(max(fy, 6.0), y_base)))
-        fit_line = " ".join(f"{x:.1f},{y:.1f}" for x, y in fit_pts)
-        fit = (f'<polyline points="{fit_line}" fill="none" stroke="#f59e0b" '
-               f'stroke-width="1.6" stroke-dasharray="5 3"/>')
+        cum = {"Claude": [], "Codex": [], "Other": [], "Total": []}
+        run = dict.fromkeys(cum, 0)
+        for d in days:
+            for name in ("Claude", "Codex", "Other"):
+                run[name] += vend(d, name, vkey)
+            run["Total"] += d[vkey]
+            cum["Claude"].append(run["Claude"])
+            cum["Codex"].append(run["Claude"] + run["Codex"])
+            cum["Other"].append(run["Claude"] + run["Codex"] + run["Other"])
+            cum["Total"].append(run["Total"])
+        maxv = max(cum["Total"]) or 1
+        scale = (y_base - y_top) / maxv
+
+        bands = []  # (name, label, color, top_cum, bottom_cum, final_value)
+        if has_vendors:
+            prev = None
+            for name, label, color in LINE_SERIES:
+                top = cum[name]
+                if not any(vend(d, name, vkey) for d in days):
+                    prev = top
+                    continue
+                bands.append((name, label, color, top, prev,
+                              top[-1] - (prev[-1] if prev else 0)))
+                prev = top
+        else:
+            bands.append(("Total", "トータル", BAND_COLORS["Other"],
+                          cum["Total"], None, cum["Total"][-1]))
+
+        # ラベル配置: 帯の厚みと見積り幅で内側／外側を決める
+        def est_w(text: str) -> float:
+            return 14.0 + len(text) * 8.1
+
+        px1 = x_right
+
+        def xs(i: int) -> float:
+            return x0 + (px1 - x0) * (i / (n - 1) if n > 1 else 0.5)
+
+        def pts_of(c: list) -> list:
+            return [(xs(i), y_base - v * scale) for i, v in enumerate(c)]
+
+        def area_path(top: list, bottom: list | None) -> str:
+            fwd = " ".join(f"L {x:.1f},{y:.1f}" for x, y in top)
+            if bottom is None:
+                return (f"M {top[0][0]:.1f},{y_base:.1f} {fwd} "
+                        f"L {top[-1][0]:.1f},{y_base:.1f} Z")
+            back = " ".join(f"L {x:.1f},{y:.1f}" for x, y in reversed(bottom))
+            return f"M {top[0][0]:.1f},{top[0][1]:.1f} {fwd} {back} Z"
+
+        def interp_y(pts: list, x: float) -> float:
+            """折れ線上の x における y（線形補間）。"""
+            if x <= pts[0][0]:
+                return pts[0][1]
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                if x <= bx:
+                    return ay if bx == ax else ay + (by - ay) * (x - ax) / (bx - ax)
+            return pts[-1][1]
+
+        # ラベルは常にグラフの内部に置く（注記のために描画エリアを
+        # 狭めない）。基本は帯の中心に置き、帯の上端が左へ向かって
+        # 下がる分でラベルの左上隅が帯の上へ出る場合は、その分だけ
+        # 下へずらす（はみ出す方向はグラフ内部＝隣の帯側）。
+        label_cy = {}
+        for name, label, _c, top, bottom, final in bands:
+            text = f"{label} {fmt(final)}"
+            t_y = y_base - top[-1] * scale
+            b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
+            top_at_left = interp_y(pts_of(top), x_right - 8 - est_w(text))
+            cy = max((t_y + b_y) / 2, top_at_left + 11.0)
+            label_cy[name] = min(cy, y_base - 11.0)
+
+        # ラベル同士が近すぎる場合は、下の帯のラベルを下へ逃がして
+        # 17px の間隔を確保する（逃がし切れない場合だけ上のを上げる）。
+        names = [b[0] for b in bands]
+        for i in range(1, len(names)):
+            upper, lower = names[i], names[i - 1]
+            if label_cy[upper] > label_cy[lower] - 17.0:
+                label_cy[lower] = min(y_base - 11.0, label_cy[upper] + 17.0)
+            if label_cy[upper] > label_cy[lower] - 17.0:
+                label_cy[upper] = label_cy[lower] - 17.0
+
+        shapes = ""
+        for _name, _label, color, top, bottom, _final in bands:
+            shapes += (f'<path d="{area_path(pts_of(top), pts_of(bottom) if bottom else None)}" '
+                       f'fill="{color}"/>')
+        for name, label, color, top, bottom, final in bands:
+            t_y = y_base - top[-1] * scale
+            b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
+            cy = label_cy[name]
+            text = f"{label} {fmt(final)}"
+            gx = x_right - 8 - est_w(text)
+            shapes += (
+                f'<rect x="{gx:.1f}" y="{cy - 5:.1f}" width="10" height="10" '
+                f'fill="{color}" stroke="#fff" stroke-width="1.5"/>'
+                f'<text class="alabel" x="{gx + 14:.1f}" y="{cy + 5:.1f}">{text}</text>')
         idx = sorted({0, (n - 1) // 2, n - 1})
         xlabels = "".join(
             f'<text x="{xs(i):.1f}" y="156" font-size="10" fill="currentColor" '
@@ -350,12 +434,10 @@ def line_chart(window: dict) -> str:
             f'<div data-line="{key}"{hidden}>'
             f'<svg viewBox="0 0 {W:.0f} {H:.0f}" role="img" aria-label="日次推移" '
             f'style="width:100%;height:auto;display:block">'
-            f'<line x1="{x0}" y1="{y_top}" x2="{x1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
-            f'<line x1="{x0}" y1="{y_base}" x2="{x1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
+            f'<line x1="{x0}" y1="{y_top}" x2="{px1}" y2="{y_top}" stroke="currentColor" stroke-opacity="0.15"/>'
+            f'<line x1="{x0}" y1="{y_base}" x2="{px1}" y2="{y_base}" stroke="currentColor" stroke-opacity="0.3"/>'
             f'<text x="{x0}" y="11" font-size="10" fill="currentColor">{fmt(maxv)}</text>'
-            f'<path d="{area}" fill="#3b82f6" fill-opacity="0.10"/>'
-            f'<polyline points="{line}" fill="none" stroke="#3b82f6" stroke-width="1.8"/>'
-            f'{fit}{dots}{xlabels}</svg></div>')
+            f'{shapes}{xlabels}</svg></div>')
     return (f'<div class="chart seg"><div class="pie-title">日次推移'
             f'（<span data-total="tokens">利用量</span>'
             f'<span data-total="cost" hidden>金額</span>）</div>'
@@ -513,6 +595,10 @@ p{{margin:4px 0 8px}}
 .chart{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;background:#fff}}
 .seg{{margin:8px 0}}
 .pie-title{{font-weight:bold;font-size:13px;margin-bottom:6px}}
+.lleg{{display:flex;gap:14px;font-size:11px;margin:0 0 4px}}
+.lleg-i{{display:inline-flex;align-items:center;gap:5px}}
+.lleg-s{{display:inline-block;width:14px;height:3px;border-radius:2px}}
+.alabel{{font-size:14px;font-weight:bold;fill:#fff}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
