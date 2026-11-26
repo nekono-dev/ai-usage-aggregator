@@ -310,8 +310,8 @@ def line_chart(window: dict) -> str:
     合計になる。帯は下から Claude、Codex の順に積み上げる。上端が
     そのまま合計なので、合計の線は重ねない（UI 原則14）。
     凡例は行として置かず、帯の中に色チップ・製品名・累積の最終値を
-    書く。帯の最終的な厚みが閾値未満の場合、そのラベルはグラフの
-    右側（帯の外）に書く。ベンダ別内訳は by_day の vendors から作る。
+    書く。ラベルの横幅全体が帯に収まらない場合、そのラベルは
+    グラフの右側（帯の外）に書く。ベンダ別内訳は by_day の vendors から作る。
     vendors が無い場合は全体を1つの帯として描く。
     """
     days = window.get("by_day") or []
@@ -362,15 +362,7 @@ def line_chart(window: dict) -> str:
         def est_w(text: str) -> float:
             return 14.0 + len(text) * 8.1
 
-        outside = {}
-        for name, label, _c, top, bottom, final in bands:
-            h = (top[-1] - (bottom[-1] if bottom else 0)) * scale
-            outside[name] = h < LABEL_MIN_BAND_H
-        px1 = x_right - (150.0 if any(outside.values()) else 0.0)
-        for name, label, _c, top, bottom, final in bands:
-            if not outside[name] and est_w(f"{label} {fmt(final)}") > (px1 - x0) * 0.6:
-                outside[name] = True
-                px1 = x_right - 150.0
+        px1 = x_right
 
         def xs(i: int) -> float:
             return x0 + (px1 - x0) * (i / (n - 1) if n > 1 else 0.5)
@@ -386,6 +378,43 @@ def line_chart(window: dict) -> str:
             back = " ".join(f"L {x:.1f},{y:.1f}" for x, y in reversed(bottom))
             return f"M {top[0][0]:.1f},{top[0][1]:.1f} {fwd} {back} Z"
 
+        def interp_y(pts: list, x: float) -> float:
+            """折れ線上の x における y（線形補間）。"""
+            if x <= pts[0][0]:
+                return pts[0][1]
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                if x <= bx:
+                    return ay if bx == ax else ay + (by - ay) * (x - ax) / (bx - ax)
+            return pts[-1][1]
+
+        # 帯内ラベルは、ラベルの横幅全体が帯に収まる場合だけ帯内に置く。
+        # 帯の上端は左へ向かって下がるため、右端の厚みだけで判定すると
+        # ラベルの左上隅が帯からはみ出す。左端位置での上端に合わせ、
+        # 必要なら帯の中でラベルを下へずらす。収まらない帯は右側（外）。
+        def band_label_cy(top, bottom, text):
+            t_y = y_base - top[-1] * scale
+            b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
+            if b_y - t_y < LABEL_MIN_BAND_H or est_w(text) > (px1 - x0) * 0.6:
+                return None
+            top_at_left = interp_y(pts_of(top), px1 - 8 - est_w(text))
+            cy = max((t_y + b_y) / 2, top_at_left + 11.0)
+            return cy if cy + 11.0 <= b_y else None
+
+        label_cy = {}
+        for name, label, _c, top, bottom, final in bands:
+            cy = band_label_cy(top, bottom, f"{label} {fmt(final)}")
+            if cy is not None:
+                label_cy[name] = cy
+        if len(label_cy) < len(bands):
+            px1 = x_right - 150.0
+            label_cy = {}
+            for name, label, _c, top, bottom, final in bands:
+                cy = band_label_cy(top, bottom, f"{label} {fmt(final)}")
+                if cy is not None:
+                    label_cy[name] = cy
+        outside = {name: name not in label_cy
+                   for name, _l, _c, _t, _b, _f in bands}
+
         shapes = ""
         for _name, _label, color, top, bottom, _final in bands:
             shapes += (f'<path d="{area_path(pts_of(top), pts_of(bottom) if bottom else None)}" '
@@ -393,7 +422,7 @@ def line_chart(window: dict) -> str:
         for name, label, color, top, bottom, final in bands:
             t_y = y_base - top[-1] * scale
             b_y = y_base - (bottom[-1] * scale if bottom else 0.0)
-            cy = (t_y + b_y) / 2
+            cy = label_cy.get(name, (t_y + b_y) / 2)
             text = f"{label} {fmt(final)}"
             if outside[name]:
                 shapes += (
@@ -580,8 +609,8 @@ p{{margin:4px 0 8px}}
 .lleg{{display:flex;gap:14px;font-size:11px;margin:0 0 4px}}
 .lleg-i{{display:inline-flex;align-items:center;gap:5px}}
 .lleg-s{{display:inline-block;width:14px;height:3px;border-radius:2px}}
-.alabel{{font-size:14px;font-weight:bold;fill:#fff;paint-order:stroke;stroke:rgba(0,0,0,0.9);stroke-width:4px;stroke-linejoin:round}}
-.alabel-out{{font-size:14px;font-weight:bold;fill:currentColor;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}}
+.alabel{{font-size:14px;font-weight:bold;fill:#fff}}
+.alabel-out{{font-size:14px;font-weight:bold;fill:currentColor}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
@@ -611,8 +640,6 @@ body{{background:#121212;color:#e8e8e8}}
 .metric-btns button{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
 .metric-btns button.active{{background:#fff;color:#000;border-color:#fff}}
 .rname.out{{color:#e8e8e8}}
-.alabel{{fill:#fff;stroke:rgba(0,0,0,0.9)}}
-.alabel-out{{stroke:#1e1e1e}}
 }}
 </style>
 </head><body>
