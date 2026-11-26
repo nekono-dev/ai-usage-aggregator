@@ -580,8 +580,8 @@ p{{margin:4px 0 8px}}
 .lleg{{display:flex;gap:14px;font-size:11px;margin:0 0 4px}}
 .lleg-i{{display:inline-flex;align-items:center;gap:5px}}
 .lleg-s{{display:inline-block;width:14px;height:3px;border-radius:2px}}
-.alabel{{font-size:14px;font-weight:bold;fill:#fff;paint-order:stroke;stroke:rgba(0,0,0,0.28);stroke-width:3px;stroke-linejoin:round}}
-.alabel-out{{font-size:14px;font-weight:bold;fill:currentColor}}
+.alabel{{font-size:14px;font-weight:bold;fill:#fff;paint-order:stroke;stroke:rgba(0,0,0,0.9);stroke-width:4px;stroke-linejoin:round}}
+.alabel-out{{font-size:14px;font-weight:bold;fill:currentColor;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}}
 .row{{display:block;margin:5px 0;font-size:12px}}
 .rbar{{position:relative;height:16px;display:block}}
 .rtrack{{position:absolute;left:0;right:68px;top:0;height:16px}}
@@ -611,7 +611,8 @@ body{{background:#121212;color:#e8e8e8}}
 .metric-btns button{{background:#1e1e1e;border-color:#555;color:#e8e8e8}}
 .metric-btns button.active{{background:#fff;color:#000;border-color:#fff}}
 .rname.out{{color:#e8e8e8}}
-.alabel{{fill:#fff;stroke:rgba(0,0,0,0.65)}}
+.alabel{{fill:#fff;stroke:rgba(0,0,0,0.9)}}
+.alabel-out{{stroke:#1e1e1e}}
 }}
 </style>
 </head><body>
